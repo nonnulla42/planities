@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, ContactShadows, Edges, Environment, PerspectiveCamera } from '@react-three/drei';
+import { OrbitControls, ContactShadows, Environment, PerspectiveCamera } from '@react-three/drei';
 import { Move } from 'lucide-react';
 import * as THREE from 'three';
 import { FloorPlanData, WallSegment, Opening } from '../services/geminiService';
@@ -9,7 +9,6 @@ interface Scene3DProps {
   data: FloorPlanData;
   mode: 'orbit' | 'first-person' | 'third-person';
   onReady?: () => void;
-  onScreenshotReady?: (capture: (() => string | null) | null) => void;
 }
 
 const WALL_HEIGHT = 3;
@@ -17,7 +16,7 @@ const SCALE_FACTOR = 0.01; // 1 unit = 1 cm = 0.01m
 const SCENE_PALETTE = {
   wall: '#F2EEE7',
   wallEdge: '#E8DED0',
-  corner: '#D8C8B2',
+  corner: '#F2EEE7',
   floorBase: '#E6DED2',
   skyTop: '#1E293B',
   skyBottom: '#425268',
@@ -351,18 +350,15 @@ const WallBlock = ({
   args,
   color = SCENE_PALETTE.wall,
   map,
-  edgeColor = SCENE_PALETTE.wallEdge,
 }: {
   position: [number, number, number];
   args: [number, number, number];
   color?: string;
   map?: THREE.Texture;
-  edgeColor?: string;
 }) => (
   <mesh position={position} castShadow receiveShadow>
     <boxGeometry args={args} />
     <meshStandardMaterial color={color} map={map} roughness={0.95} metalness={0} />
-    <Edges color={edgeColor} threshold={12} />
   </mesh>
 );
 
@@ -370,12 +366,10 @@ const Wall = ({
   segment,
   openings,
   wallColor,
-  edgeColor,
 }: {
   segment: WallSegment;
   openings: Opening[];
   wallColor: string;
-  edgeColor: string;
 }) => {
   const { start, end, thickness } = segment;
   const wallThickness = thickness * SCALE_FACTOR;
@@ -413,7 +407,6 @@ const Wall = ({
           args={[segLen, WALL_HEIGHT, wallThickness]}
           color={wallColor}
           map={wallToneMap}
-          edgeColor={edgeColor}
         />
       );
     }
@@ -433,56 +426,60 @@ const Wall = ({
           args={[opLen, topPartHeight, wallThickness]}
           color={wallColor}
           map={wallToneMap}
-          edgeColor={edgeColor}
         />
       );
     } else {
-      // Window: top and bottom parts
-      const winBottom = 0.9;
-      const winHeight = 1.2;
+      const isFloorWindow = op.type === 'window-floor';
+      const winBottom = isFloorWindow ? 0 : 0.9;
+      const winHeight = isFloorWindow ? 2.1 : 1.2;
       const winTop = winBottom + winHeight;
-      
-      // Bottom part
-      segments.push(
-        <WallBlock
-          key={`win-bottom-${i}`}
-          position={[opCenterX * wallLength, winBottom / 2, 0]}
-          args={[opLen, winBottom, wallThickness]}
-          color={wallColor}
-          map={wallToneMap}
-          edgeColor={edgeColor}
-        />
-      );
-      // Top part
+      const frameThickness = wallThickness * 0.3;
+
+      if (!isFloorWindow) {
+        segments.push(
+          <WallBlock
+            key={`win-bottom-${i}`}
+            position={[opCenterX * wallLength, winBottom / 2, 0]}
+            args={[opLen, winBottom, wallThickness]}
+            color={wallColor}
+            map={wallToneMap}
+          />
+        );
+      }
+
       const topPartHeight = WALL_HEIGHT - winTop;
-      segments.push(
-        <WallBlock
-          key={`win-top-${i}`}
-          position={[opCenterX * wallLength, winTop + topPartHeight / 2, 0]}
-          args={[opLen, topPartHeight, wallThickness]}
-          color={wallColor}
-          map={wallToneMap}
-          edgeColor={edgeColor}
-        />
-      );
-      
-      // Window visual (the cross)
+      if (topPartHeight > 0.01) {
+        segments.push(
+          <WallBlock
+            key={`win-top-${i}`}
+            position={[opCenterX * wallLength, winTop + topPartHeight / 2, 0]}
+            args={[opLen, topPartHeight, wallThickness]}
+            color={wallColor}
+            map={wallToneMap}
+          />
+        );
+      }
+
       segments.push(
         <group key={`win-visual-${i}`} position={[opCenterX * wallLength, winBottom + winHeight / 2, 0]}>
-          {/* Glass */}
           <mesh>
             <boxGeometry args={[opLen, winHeight, wallThickness * 0.2]} />
             <meshStandardMaterial color={SCENE_PALETTE.windowGlass} transparent opacity={0.38} />
           </mesh>
-          {/* Cross frame */}
           <mesh>
-            <boxGeometry args={[opLen, 0.05, wallThickness * 0.3]} />
+            <boxGeometry args={[opLen, 0.05, frameThickness]} />
             <meshStandardMaterial color={SCENE_PALETTE.windowFrame} />
           </mesh>
           <mesh>
-            <boxGeometry args={[0.05, winHeight, wallThickness * 0.3]} />
+            <boxGeometry args={[0.05, winHeight, frameThickness]} />
             <meshStandardMaterial color={SCENE_PALETTE.windowFrame} />
           </mesh>
+          {isFloorWindow && (
+            <mesh position={[0, -winHeight / 2 + 0.035, 0]}>
+              <boxGeometry args={[opLen, 0.05, frameThickness]} />
+              <meshStandardMaterial color={SCENE_PALETTE.windowFrame} />
+            </mesh>
+          )}
         </group>
       );
     }
@@ -501,7 +498,6 @@ const Wall = ({
         args={[segLen, WALL_HEIGHT, wallThickness]}
         color={wallColor}
         map={wallToneMap}
-        edgeColor={edgeColor}
       />
     );
   }
@@ -520,18 +516,6 @@ const Corner3D = ({ position, thickness }: { position: { x: number, y: number },
     <mesh position={[worldPosition.x, WALL_HEIGHT / 2, worldPosition.z]} castShadow receiveShadow>
       <cylinderGeometry args={[radius, radius, WALL_HEIGHT, 16]} />
       <meshStandardMaterial color={SCENE_PALETTE.corner} roughness={0.98} metalness={0} />
-      <Edges color="#BDA88C" threshold={18} />
-    </mesh>
-  );
-};
-
-const CornerSeam3D = ({ position, thickness }: { position: { x: number, y: number }, thickness: number }) => {
-  const worldPosition = planPointToWorld(position);
-  const seamRadius = Math.max(thickness * SCALE_FACTOR * 0.07, 0.012);
-  return (
-    <mesh position={[worldPosition.x, WALL_HEIGHT / 2, worldPosition.z]} castShadow receiveShadow>
-      <cylinderGeometry args={[seamRadius, seamRadius, WALL_HEIGHT, 12]} />
-      <meshStandardMaterial color="#F2E9DB" roughness={1} metalness={0} transparent opacity={0.38} />
     </mesh>
   );
 };
@@ -989,7 +973,7 @@ const ThirdPersonWalker = ({
       </mesh>
 
       <group position={[0, 0.06, 0]}>
-        <mesh position={[0, 1.44, 0]} scale={[0.9, 1.1, 0.9]} castShadow>
+        <mesh position={[0, 1.44, 0]} scale={[0.82, 1.04, 0.82]} castShadow>
           <sphereGeometry args={[0.125, 30, 30]} />
           <meshStandardMaterial
             ref={bodyMaterial}
@@ -1014,7 +998,7 @@ const ThirdPersonWalker = ({
           />
         </mesh>
 
-        <mesh position={[0, 1.02, 0]} scale={[1.14, 0.88, 1]} castShadow>
+        <mesh position={[0, 1.02, 0]} scale={[1.02, 0.86, 0.9]} castShadow>
           <capsuleGeometry args={[0.155, 0.36, 8, 18]} />
           <meshStandardMaterial
             ref={shoulderMaterial}
@@ -1028,7 +1012,7 @@ const ThirdPersonWalker = ({
           />
         </mesh>
 
-        <mesh position={[0, 0.72, 0]} scale={[0.96, 1.14, 0.98]} castShadow>
+        <mesh position={[0, 0.72, 0]} scale={[0.86, 1.12, 0.88]} castShadow>
           <capsuleGeometry args={[0.19, 0.42, 8, 18]} />
           <meshStandardMaterial
             ref={torsoMaterial}
@@ -1042,7 +1026,7 @@ const ThirdPersonWalker = ({
           />
         </mesh>
 
-        <mesh position={[0, 0.38, 0]} scale={[0.9, 1.02, 0.9]} castShadow>
+        <mesh position={[0, 0.38, 0]} scale={[0.8, 1, 0.8]} castShadow>
           <cylinderGeometry args={[0.12, 0.08, 0.26, 24]} />
           <meshStandardMaterial
             ref={tailMaterial}
@@ -1058,7 +1042,7 @@ const ThirdPersonWalker = ({
   );
 };
 
-export const Scene3D: React.FC<Scene3DProps> = ({ data, mode, onReady, onScreenshotReady }) => {
+export const Scene3D: React.FC<Scene3DProps> = ({ data, mode, onReady }) => {
   const [isLocked, setIsLocked] = useState(false);
   const [isCanvasMounted, setIsCanvasMounted] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -1156,25 +1140,6 @@ export const Scene3D: React.FC<Scene3DProps> = ({ data, mode, onReady, onScreens
   };
 
   useEffect(() => {
-    if (!onScreenshotReady) {
-      return;
-    }
-
-    onScreenshotReady(() => {
-      const canvas = canvasElementRef.current;
-      if (!canvas || canvas.width === 0 || canvas.height === 0) {
-        return null;
-      }
-
-      return canvas.toDataURL('image/png');
-    });
-
-    return () => {
-      onScreenshotReady(null);
-    };
-  }, [onScreenshotReady]);
-
-  useEffect(() => {
     const container = containerRef.current;
     if (!container) {
       return;
@@ -1232,7 +1197,6 @@ export const Scene3D: React.FC<Scene3DProps> = ({ data, mode, onReady, onScreens
           frameloop="always"
           shadows
           dpr={[1, 2]}
-          gl={{ preserveDrawingBuffer: true }}
           onCreated={({ gl }) => {
             canvasElementRef.current = gl.domElement;
           }}
@@ -1291,16 +1255,7 @@ export const Scene3D: React.FC<Scene3DProps> = ({ data, mode, onReady, onScreens
                 key={`wall-${i}`}
                 segment={wall}
                 openings={data.openings}
-                wallColor={
-                  i % 3 === 0 ? '#F5F1EA' :
-                  i % 3 === 1 ? '#EFE7DA' :
-                  '#E9E0D3'
-                }
-                edgeColor={
-                  i % 3 === 0 ? '#C7B39A' :
-                  i % 3 === 1 ? '#BEA98F' :
-                  '#B6A085'
-                }
+                wallColor={SCENE_PALETTE.wall}
               />
             ))}
 
@@ -1327,7 +1282,6 @@ export const Scene3D: React.FC<Scene3DProps> = ({ data, mode, onReady, onScreens
                 return (
                   <React.Fragment key={`corner-${key}`}>
                     <Corner3D position={data.point} thickness={data.thickness} />
-                    <CornerSeam3D position={data.point} thickness={data.thickness} />
                   </React.Fragment>
                 );
               });

@@ -1,5 +1,5 @@
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Upload, Box, Eye, Move, ArrowLeft, Search, Hand, Plus, PersonStanding, FolderOpen, Download, Camera } from 'lucide-react';
+import { Upload, Box, Eye, Move, ArrowLeft, Search, Hand, Plus, PersonStanding, FolderOpen, Download } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { FloorPlanData } from './services/geminiService';
 import { WorkflowStep, WorkflowStepper } from './components/WorkflowStepper';
@@ -46,9 +46,7 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPreparing3D, setIsPreparing3D] = useState(false);
   const [isSceneReady, setIsSceneReady] = useState(false);
-  const [capture3D, setCapture3D] = useState<(() => string | null) | null>(null);
-  const [screenshotMessage, setScreenshotMessage] = useState<string | null>(null);
-  const [currentStep, setCurrentStep] = useState<WorkflowStep>('trace');
+  const [currentStep, setCurrentStep] = useState<WorkflowStep>('scale');
   const [isScaleCalibrated, setIsScaleCalibrated] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
   const hasBackground = Boolean(previewUrl);
@@ -65,7 +63,7 @@ export default function App() {
     setEditorInstance((value) => value + 1);
     setSceneInstance(0);
     setPreviewUrl(null);
-    setCurrentStep('trace');
+    setCurrentStep('scale');
     setIsScaleCalibrated(false);
     setViewMode('orbit');
     setIsPreparing3D(false);
@@ -73,13 +71,13 @@ export default function App() {
   }, []);
 
   const openEditor = useCallback((nextPreviewUrl: string | null) => {
-    const startsFromTrace = Boolean(nextPreviewUrl);
+    const hasImportedReference = Boolean(nextPreviewUrl);
     setPreviewUrl(nextPreviewUrl);
     setData(null);
     setEditorDraft(null);
     setEditorInstance((value) => value + 1);
-    setCurrentStep(startsFromTrace ? 'trace' : 'scale');
-    setIsScaleCalibrated(!startsFromTrace);
+    setCurrentStep(hasImportedReference ? 'scale' : 'trace');
+    setIsScaleCalibrated(!hasImportedReference);
     setViewMode('orbit');
     setIsPreparing3D(false);
     setIsSceneReady(false);
@@ -102,13 +100,18 @@ export default function App() {
 
   const loadImportedProject = useCallback((fileData: PlanitiesProjectFile) => {
     const nextProject = cloneProjectData(fileData.project);
+    const importedHasReference = Boolean(fileData.previewUrl);
+    const nextStep = importedHasReference
+      ? (fileData.isScaleCalibrated ? (fileData.workflowStep === 'scale' ? 'trace' : fileData.workflowStep) : 'scale')
+      : 'trace';
+
     setPreviewUrl(fileData.previewUrl);
     setData(nextProject);
     setEditorDraft(nextProject);
     setEditorInstance((value) => value + 1);
     setSceneInstance((value) => value + 1);
-    setCurrentStep(fileData.workflowStep);
-    setIsScaleCalibrated(fileData.isScaleCalibrated);
+    setCurrentStep(nextStep);
+    setIsScaleCalibrated(importedHasReference ? fileData.isScaleCalibrated : true);
     setViewMode('orbit');
     setIsPreparing3D(false);
     setIsSceneReady(false);
@@ -116,8 +119,8 @@ export default function App() {
   }, [cloneProjectData]);
 
   useEffect(() => {
-    if (state === 'editor' && !hasBackground && currentStep === 'trace') {
-      setCurrentStep('scale');
+    if (state === 'editor' && !hasBackground && currentStep === 'scale') {
+      setCurrentStep('trace');
     }
     if (state === 'editor' && !hasBackground && !isScaleCalibrated) {
       setIsScaleCalibrated(true);
@@ -186,7 +189,7 @@ export default function App() {
       formatVersion: 1,
       appVersion: '1.0.0',
       exportedAt: new Date().toISOString(),
-      workflowStep: currentStep === '3d' ? 'scale' : currentStep,
+      workflowStep: currentStep === '3d' ? 'trace' : currentStep,
       isScaleCalibrated,
       previewUrl,
       project: cloneProjectData(projectForExport),
@@ -243,7 +246,7 @@ export default function App() {
         typeof opening?.position?.x === 'number' &&
         typeof opening?.position?.y === 'number' &&
         typeof opening?.width === 'number' &&
-        (opening?.type === 'door' || opening?.type === 'window') &&
+        (opening?.type === 'door' || opening?.type === 'window' || opening?.type === 'window-floor') &&
         typeof opening?.rotation === 'number',
       );
 
@@ -255,8 +258,8 @@ export default function App() {
         formatVersion: 1,
         appVersion: typeof parsed.appVersion === 'string' ? parsed.appVersion : 'unknown',
         exportedAt: typeof parsed.exportedAt === 'string' ? parsed.exportedAt : new Date().toISOString(),
-        workflowStep: parsed.workflowStep === 'trace' && parsed.previewUrl ? 'trace' : 'scale',
-        isScaleCalibrated: parsed.workflowStep === 'trace' && parsed.previewUrl ? Boolean(parsed.isScaleCalibrated) : true,
+        workflowStep: parsed.workflowStep === 'scale' || parsed.workflowStep === 'trace' ? parsed.workflowStep : 'trace',
+        isScaleCalibrated: parsed.previewUrl ? Boolean(parsed.isScaleCalibrated) : true,
         previewUrl: typeof parsed.previewUrl === 'string' ? parsed.previewUrl : null,
         project: parsed.project,
       });
@@ -266,47 +269,6 @@ export default function App() {
       alert(message);
     }
   }, [hasProjectContent, loadImportedProject, state]);
-
-  const showScreenshotMessage = useCallback((message: string) => {
-    setScreenshotMessage(message);
-    window.setTimeout(() => {
-      setScreenshotMessage((current) => (current === message ? null : current));
-    }, 2200);
-  }, []);
-
-  const handleScreenshot = useCallback(() => {
-    if (!capture3D) {
-      showScreenshotMessage('Unable to capture screenshot.');
-      return;
-    }
-
-    try {
-      const imageDataUrl = capture3D();
-      if (!imageDataUrl) {
-        showScreenshotMessage('Unable to capture screenshot.');
-        return;
-      }
-
-      const now = new Date();
-      const timestamp = [
-        now.getFullYear(),
-        String(now.getMonth() + 1).padStart(2, '0'),
-        String(now.getDate()).padStart(2, '0'),
-      ].join('-') + '-' + [
-        String(now.getHours()).padStart(2, '0'),
-        String(now.getMinutes()).padStart(2, '0'),
-        String(now.getSeconds()).padStart(2, '0'),
-      ].join('');
-
-      const link = document.createElement('a');
-      link.href = imageDataUrl;
-      link.download = `planities-3d-${timestamp}.png`;
-      link.click();
-    } catch (error) {
-      console.error('Screenshot capture failed:', error);
-      showScreenshotMessage('Screenshot failed.');
-    }
-  }, [capture3D, showScreenshotMessage]);
 
   return (
     <div className="h-screen overflow-hidden bg-[#E4E3E0] text-[#141414] font-sans selection:bg-[#141414] selection:text-[#E4E3E0] flex flex-col">
@@ -355,7 +317,7 @@ export default function App() {
             <div className="flex items-center gap-3">
               {currentStep === '3d' && (
                 <button
-                  onClick={() => setCurrentStep('scale')}
+                  onClick={() => setCurrentStep('trace')}
                   className="flex items-center gap-2 rounded-2xl border border-[#141414]/10 bg-white px-4 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-[#141414] transition-all hover:bg-[#141414]/5"
                 >
                   <Hand className="h-4 w-4" />
@@ -410,7 +372,7 @@ export default function App() {
                     <span className="italic serif opacity-50">to Space.</span>
                   </h2>
                   <p className="text-xl opacity-60 max-w-md mx-auto md:mx-0">
-                    Upload a 2D floor plan, trace the walls, and turn it into a navigable 3D space.
+                    Upload a 2D floor plan, calibrate one known span, then trace the full layout at real scale.
                   </p>
                 </div>
 
@@ -465,16 +427,16 @@ export default function App() {
                   <div className="space-y-2">
                     <div className="flex items-center gap-2 text-xs font-mono uppercase opacity-50">
                       <Search className="w-3 h-3" />
-                      Trace
+                      Scale
                     </div>
-                    <p className="text-sm">Draw walls precisely over the source plan.</p>
+                    <p className="text-sm">Trace one known segment first and enter its real measurement.</p>
                   </div>
                   <div className="space-y-2">
                     <div className="flex items-center gap-2 text-xs font-mono uppercase opacity-50">
                       <Box className="w-3 h-3" />
-                      3D Preview
+                      Trace
                     </div>
-                    <p className="text-sm">Generate clean architectural volumes in a single step.</p>
+                    <p className="text-sm">Draw the full plan at real size once the scale is locked.</p>
                   </div>
                   <div className="space-y-2">
                     <div className="flex items-center gap-2 text-xs font-mono uppercase opacity-50">
@@ -501,8 +463,9 @@ export default function App() {
                   <ManualTracer
                     key={editorInstance}
                     imageUrl={previewUrl}
-                    workflowStep={currentStep === 'trace' ? 'trace' : 'scale'}
+                    workflowStep={currentStep === 'scale' ? 'scale' : 'trace'}
                     isScaleCalibrated={isScaleCalibrated}
+                    initialSuggestedScale={(editorDraft ?? data)?.suggestedScale}
                     initialWalls={(editorDraft ?? data)?.walls}
                     initialOpenings={(editorDraft ?? data)?.openings}
                     onProjectChange={(draft) => {
@@ -510,7 +473,7 @@ export default function App() {
                     }}
                     onScaleCalibrated={() => {
                       setIsScaleCalibrated(true);
-                      setCurrentStep('scale');
+                      setCurrentStep('trace');
                     }}
                     onComplete={(manualData) => {
                       setIsPreparing3D(true);
@@ -534,7 +497,6 @@ export default function App() {
                       key={`${sceneInstance}`}
                       data={data}
                       mode={viewMode}
-                      onScreenshotReady={setCapture3D}
                       onReady={() => {
                         setIsSceneReady(true);
                         setIsPreparing3D(false);
@@ -558,13 +520,6 @@ export default function App() {
                     )}
 
                     <div className="absolute bottom-8 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2 rounded-2xl border border-[#141414]/10 bg-[#F4F2EE]/82 p-2 shadow-2xl backdrop-blur-xl">
-                      <button
-                        onClick={handleScreenshot}
-                        className="flex items-center gap-2 px-6 py-3 rounded-xl text-[#141414]/68 transition-all hover:bg-[#141414]/5 hover:text-[#141414]"
-                      >
-                        <Camera className="w-4 h-4" />
-                        <span className="text-sm font-medium uppercase tracking-wider">Screenshot</span>
-                      </button>
                       <button
                         onClick={() => setViewMode('orbit')}
                         className={`flex items-center gap-2 px-6 py-3 rounded-xl transition-all ${
@@ -599,12 +554,6 @@ export default function App() {
                         <span className="text-sm font-medium uppercase tracking-wider">Third Person</span>
                       </button>
                     </div>
-
-                    {screenshotMessage && (
-                      <div className="absolute bottom-8 left-8 z-50 rounded-2xl bg-[#141414]/84 px-4 py-3 text-[10px] font-mono uppercase tracking-[0.18em] text-white shadow-xl backdrop-blur-md">
-                        {screenshotMessage}
-                      </div>
-                    )}
                   </div>
                 </Suspense>
               )}

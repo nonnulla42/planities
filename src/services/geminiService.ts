@@ -17,7 +17,7 @@ export interface WallSegment {
 export interface Opening {
   position: Point;
   width: number;
-  type: 'door' | 'window';
+  type: 'door' | 'window' | 'window-floor';
   rotation: number; // in degrees
   thickness?: number; // thickness of the wall it's on
   wallId?: string;
@@ -45,7 +45,7 @@ export async function analyzeFloorPlan(base64Image: string, mimeType: string): P
   The JSON schema must be:
   {
     "walls": [{"start": {"x": number, "y": number}, "end": {"x": number, "y": number}, "thickness": number}],
-    "openings": [{"position": {"x": number, "y": number}, "width": number, "type": "door" | "window", "rotation": number}],
+    "openings": [{"position": {"x": number, "y": number}, "width": number, "type": "door" | "window" | "window-floor", "rotation": number}],
     "suggestedScale": number
   }`;
 
@@ -101,7 +101,7 @@ export async function analyzeFloorPlan(base64Image: string, mimeType: string): P
                     required: ["x", "y"]
                   },
                   width: { type: Type.NUMBER },
-                  type: { type: Type.STRING, enum: ["door", "window"] },
+                  type: { type: Type.STRING, enum: ["door", "window", "window-floor"] },
                   rotation: { type: Type.NUMBER }
                 },
                 required: ["position", "width", "type", "rotation"]

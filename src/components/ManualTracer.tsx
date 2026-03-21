@@ -50,6 +50,14 @@ const WindowIcon = () => (
   </svg>
 );
 
+const FloorWindowIcon = () => (
+  <svg width="24" height="14" viewBox="0 0 24 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect x="1" y="1" width="22" height="12" rx="1" fill="currentColor" fillOpacity="0.1" stroke="currentColor" strokeWidth="1.5"/>
+    <path d="M12 1V13" stroke="currentColor" strokeWidth="1" strokeOpacity="0.65"/>
+    <path d="M1 3.5H23" stroke="currentColor" strokeWidth="1" strokeOpacity="0.45"/>
+  </svg>
+);
+
 const GuideTip = ({ children }: { children: React.ReactNode }) => (
   <p className="rounded-2xl bg-[#F1ECE3] px-3 py-2 text-[10px] font-medium leading-relaxed text-[#6C5A46]">
     {children}
@@ -60,6 +68,7 @@ interface ManualTracerProps {
   imageUrl?: string | null;
   workflowStep: 'trace' | 'scale';
   isScaleCalibrated: boolean;
+  initialSuggestedScale?: number;
   initialWalls?: WallSegment[];
   initialOpenings?: Opening[];
   onScaleCalibrated: () => void;
@@ -99,6 +108,11 @@ interface BackgroundTransform {
   x: number;
   y: number;
   rotation: number;
+}
+
+interface CalibrationSegment {
+  start: Point;
+  end: Point;
 }
 
 interface AlignmentGuide {
@@ -325,13 +339,13 @@ const wallIntersectsRect = (wall: WallSegment, rect: { minX: number; minY: numbe
 const GUIDE_PANEL_CONTENT: Record<'trace' | 'scale', Record<GuideGroup, GuidePanelContent>> = {
   trace: {
     drawing: {
-      title: 'Draw the plan',
+      title: 'Trace the plan',
       sections: [
         {
           label: 'Wall',
           description: [
             'Click to start a wall.',
-            'Click again to place the endpoint, or type a length in SCALE mode.',
+            'Click again to place the endpoint and trace the full layout at real scale.',
             'Hold SHIFT to constrain drawing to horizontal, vertical, 45° diagonals, and the perpendicular direction relative to the previously drawn wall.',
           ],
         },
@@ -393,9 +407,10 @@ const GUIDE_PANEL_CONTENT: Record<'trace' | 'scale', Record<GuideGroup, GuidePan
       title: 'Reference and workflow',
       sections: [
         {
-          label: 'Convert',
+          label: 'Recal',
           description: [
-            'Switch from tracing to real-scale editing.',
+            'Use RECAL to draw a new reference segment and manually correct the scale after tracing has started.',
+            'This does not replace your walls with a new reference line.',
           ],
         },
         {
@@ -429,30 +444,30 @@ const GUIDE_PANEL_CONTENT: Record<'trace' | 'scale', Record<GuideGroup, GuidePan
   },
   scale: {
     drawing: {
-      title: 'Draw the plan',
+      title: 'Set the scale',
       sections: [
         {
-          label: 'Wall',
+          label: 'Reference',
           description: [
-            'Click to start a wall.',
-            'Click again to place the endpoint, or type a length in SCALE mode.',
+            'Trace one simple reference segment over a wall or span with a known real measurement.',
+            'Click again to place the endpoint, or type the reference length while drawing.',
             'Hold SHIFT to constrain drawing to horizontal, vertical, 45° diagonals, and the perpendicular direction relative to the previously drawn wall.',
           ],
         },
         {
-          label: 'Door',
+          label: 'Confirm',
           description: [
-            'Insert openings in walls to represent entrances.',
+            'Select the reference segment and enter its real internal span to lock the project scale.',
           ],
         },
         {
           label: 'Window',
           description: [
-            'Add windows to better define rooms and facades.',
+            'After scale is set, continue in TRACE mode to draw the final wall layout.',
           ],
         },
       ],
-      tip: 'Tip: snapping helps align new walls with existing geometry.',
+      tip: 'Tip: after scale is locked, continue in TRACE mode to draw the full plan.',
     },
     interaction: {
       title: 'Edit and organize',
@@ -497,9 +512,10 @@ const GUIDE_PANEL_CONTENT: Record<'trace' | 'scale', Record<GuideGroup, GuidePan
       title: 'Scale and reference',
       sections: [
         {
-          label: 'Recal',
+          label: 'Set Scale',
           description: [
-            'Recalibrate the real scale of the project.',
+            'Click SET SCALE to enter calibration mode immediately.',
+            'Draw a reference segment over a known distance, then enter its real measurement to lock the global scale.',
           ],
         },
         {
@@ -532,6 +548,7 @@ const GUIDE_PANEL_CONTENT: Record<'trace' | 'scale', Record<GuideGroup, GuidePan
 };
 
 const ROOM_GRAPH_EPSILON = 1e-6;
+const CALIBRATION_SPAN_EPSILON = 1e-3;
 
 const getPointKey = (point: Point) => `${point.x.toFixed(4)},${point.y.toFixed(4)}`;
 
@@ -605,6 +622,173 @@ const getSegmentIntersections = (aStart: Point, aEnd: Point, bStart: Point, bEnd
   }
 
   return intersections;
+};
+
+const getDistanceToSegment = (point: Point, start: Point, end: Point) => {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSq = dx * dx + dy * dy;
+
+  if (lengthSq <= ROOM_GRAPH_EPSILON) {
+    return Math.hypot(point.x - start.x, point.y - start.y);
+  }
+
+  const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq));
+  const closestX = start.x + dx * t;
+  const closestY = start.y + dy * t;
+  return Math.hypot(point.x - closestX, point.y - closestY);
+};
+
+const getWallLengthCm = (wall: WallSegment) => Math.hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y);
+
+const getWallOutline = (wall: WallSegment) => {
+  const direction = normalizeDirection(wall.start, wall.end);
+  if (!direction) {
+    return null;
+  }
+
+  const halfThickness = wall.thickness / 2;
+  const normal = { x: -direction.y, y: direction.x };
+
+  return [
+    {
+      x: wall.start.x + normal.x * halfThickness,
+      y: wall.start.y + normal.y * halfThickness,
+    },
+    {
+      x: wall.end.x + normal.x * halfThickness,
+      y: wall.end.y + normal.y * halfThickness,
+    },
+    {
+      x: wall.end.x - normal.x * halfThickness,
+      y: wall.end.y - normal.y * halfThickness,
+    },
+    {
+      x: wall.start.x - normal.x * halfThickness,
+      y: wall.start.y - normal.y * halfThickness,
+    },
+  ] as const;
+};
+
+const getReferenceLineWallIntersections = (referenceStart: Point, referenceEnd: Point, wall: WallSegment) => {
+  const outline = getWallOutline(wall);
+  if (!outline) {
+    return [] as Point[];
+  }
+
+  const edges: Array<[Point, Point]> = [
+    [outline[0], outline[1]],
+    [outline[1], outline[2]],
+    [outline[2], outline[3]],
+    [outline[3], outline[0]],
+  ];
+
+  const intersections: Point[] = [];
+  edges.forEach(([edgeStart, edgeEnd]) => {
+    getSegmentIntersections(referenceStart, referenceEnd, edgeStart, edgeEnd).forEach((point) => {
+      if (!intersections.some((existing) => pointsEqual(existing, point))) {
+        intersections.push(point);
+      }
+    });
+  });
+
+  return intersections;
+};
+
+const getInteriorCalibrationSpanLength = (selectedWall: WallSegment, allWalls: WallSegment[]) => {
+  const wallLength = getWallLengthCm(selectedWall);
+  const direction = normalizeDirection(selectedWall.start, selectedWall.end);
+  if (!direction || wallLength <= CALIBRATION_SPAN_EPSILON) {
+    return wallLength;
+  }
+
+  const endpointTolerance = Math.max(selectedWall.thickness * 0.75, 2);
+  const connectedStartWalls = allWalls.filter((wall) =>
+    wall !== selectedWall &&
+    getDistanceToSegment(selectedWall.start, wall.start, wall.end) <= wall.thickness / 2 + endpointTolerance,
+  );
+  const connectedEndWalls = allWalls.filter((wall) =>
+    wall !== selectedWall &&
+    getDistanceToSegment(selectedWall.end, wall.start, wall.end) <= wall.thickness / 2 + endpointTolerance,
+  );
+
+  if (connectedStartWalls.length === 0 || connectedEndWalls.length === 0) {
+    return wallLength;
+  }
+
+  const normal = { x: -direction.y, y: direction.x };
+  const halfThickness = selectedWall.thickness / 2;
+  const referenceLines = [
+    {
+      start: {
+        x: selectedWall.start.x + normal.x * halfThickness,
+        y: selectedWall.start.y + normal.y * halfThickness,
+      },
+      end: {
+        x: selectedWall.end.x + normal.x * halfThickness,
+        y: selectedWall.end.y + normal.y * halfThickness,
+      },
+    },
+    {
+      start: {
+        x: selectedWall.start.x - normal.x * halfThickness,
+        y: selectedWall.start.y - normal.y * halfThickness,
+      },
+      end: {
+        x: selectedWall.end.x - normal.x * halfThickness,
+        y: selectedWall.end.y - normal.y * halfThickness,
+      },
+    },
+  ];
+
+  const resolveBoundary = (
+    referenceStart: Point,
+    referenceEnd: Point,
+    candidates: WallSegment[],
+    side: 'start' | 'end',
+  ) => {
+    const projectedIntersections = candidates.flatMap((wall) =>
+      getReferenceLineWallIntersections(referenceStart, referenceEnd, wall)
+        .map((point) => ({
+          point,
+          t: getSegmentInterpolation(referenceStart, referenceEnd, point),
+        }))
+        .filter(({ t }) => t >= -0.2 && t <= 1.2),
+    );
+
+    if (projectedIntersections.length === 0) {
+      return null;
+    }
+
+    if (side === 'start') {
+      const interiorCandidates = projectedIntersections.filter(({ t }) => t <= 0.75 + CALIBRATION_SPAN_EPSILON);
+      const targetPool = interiorCandidates.length > 0 ? interiorCandidates : projectedIntersections;
+      return targetPool.reduce((best, current) => (current.t > best.t ? current : best));
+    }
+
+    const interiorCandidates = projectedIntersections.filter(({ t }) => t >= 0.25 - CALIBRATION_SPAN_EPSILON);
+    const targetPool = interiorCandidates.length > 0 ? interiorCandidates : projectedIntersections;
+    return targetPool.reduce((best, current) => (current.t < best.t ? current : best));
+  };
+
+  const validSpans = referenceLines
+    .map(({ start, end }) => {
+      const startBoundary = resolveBoundary(start, end, connectedStartWalls, 'start');
+      const endBoundary = resolveBoundary(start, end, connectedEndWalls, 'end');
+
+      if (!startBoundary || !endBoundary || endBoundary.t <= startBoundary.t) {
+        return null;
+      }
+
+      return Math.hypot(endBoundary.point.x - startBoundary.point.x, endBoundary.point.y - startBoundary.point.y);
+    })
+    .filter((span): span is number => typeof span === 'number' && span > CALIBRATION_SPAN_EPSILON);
+
+  if (validSpans.length === 0) {
+    return wallLength;
+  }
+
+  return Math.min(...validSpans);
 };
 
 const getPolygonArea = (polygon: Point[]) => {
@@ -1038,6 +1222,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   imageUrl,
   workflowStep,
   isScaleCalibrated,
+  initialSuggestedScale,
   initialWalls,
   initialOpenings,
   onScaleCalibrated,
@@ -1060,7 +1245,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   const [mousePos, setMousePos] = useState<Point>({ x: 0, y: 0 });
   const [previewOpening, setPreviewOpening] = useState<{ position: Point, rotation: number, thickness: number, wallId?: string, offsetAlongWall?: number } | null>(null);
   const [currentThickness, setCurrentThickness] = useState(initialSnapshotRef.current.currentThickness);
-  const [activeTool, setActiveTool] = useState<'draw' | 'select' | 'multi-wall' | 'door' | 'window' | 'delete'>('draw');
+  const [activeTool, setActiveTool] = useState<'draw' | 'select' | 'multi-wall' | 'door' | 'window' | 'window-floor' | 'delete'>('draw');
   const [currentOpeningWidth, setCurrentOpeningWidth] = useState(initialSnapshotRef.current.currentOpeningWidth);
   const [showGuide, setShowGuide] = useState(false);
   const [openGuideGroup, setOpenGuideGroup] = useState<GuideGroup | null>(null);
@@ -1071,6 +1256,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   const hasBackground = Boolean(imageUrl);
   const [showBackground, setShowBackground] = useState(hasBackground);
   const [backgroundTransform, setBackgroundTransform] = useState<BackgroundTransform>({ x: 0, y: 0, rotation: 0 });
+  const [backgroundScale, setBackgroundScale] = useState(hasBackground ? initialSuggestedScale ?? 1 : 1);
   const [isAdjustingBackground, setIsAdjustingBackground] = useState(false);
   const [backgroundDragOrigin, setBackgroundDragOrigin] = useState<{ pointer: Point; transform: BackgroundTransform } | null>(null);
   const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuide[]>([]);
@@ -1092,7 +1278,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   
   // Mode & Scaling
   const [isCalibrating, setIsCalibrating] = useState(false);
+  const [calibrationMode, setCalibrationMode] = useState<'wall' | 'reference'>('wall');
   const [calibrationWallIndex, setCalibrationWallIndex] = useState<number | null>(null);
+  const [referenceCalibrationStart, setReferenceCalibrationStart] = useState<Point | null>(null);
+  const [referenceCalibrationSegment, setReferenceCalibrationSegment] = useState<CalibrationSegment | null>(null);
   const [realLengthInput, setRealLengthInput] = useState('5');
   
   // Undo/Redo state
@@ -1128,6 +1317,8 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   const wallsRef = useRef(walls);
   const openingsRef = useRef(openings);
   const mode: 'trace' | 'scale' = workflowStep === 'trace' ? 'trace' : 'scale';
+  const isPrimaryScaleStep = workflowStep === 'scale' && hasBackground && !isScaleCalibrated;
+  const isReferenceCalibration = isCalibrating && calibrationMode === 'reference';
   const modeRef = useRef(mode);
   const aspectRatioRef = useRef(aspectRatio);
   const currentThicknessRef = useRef(currentThickness);
@@ -1138,6 +1329,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   const selectedWallIndicesRef = useRef(selectedWallIndices);
   const selectedOpeningIndexRef = useRef(selectedOpeningIndex);
   const backgroundTransformRef = useRef(backgroundTransform);
+  const backgroundScaleRef = useRef(backgroundScale);
   const guideHighlightTimeoutRef = useRef<number | null>(null);
   const [guideViewportTick, setGuideViewportTick] = useState(0);
 
@@ -1152,6 +1344,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   useEffect(() => {
     backgroundTransformRef.current = backgroundTransform;
   }, [backgroundTransform]);
+
+  useEffect(() => {
+    backgroundScaleRef.current = backgroundScale;
+  }, [backgroundScale]);
 
   useEffect(() => {
     wallsRef.current = walls;
@@ -1169,10 +1365,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     onProjectChange({
       walls: cloneWalls(walls),
       openings: attachOpeningsToWalls(openings, walls),
-      suggestedScale: 1,
+      suggestedScale: backgroundScale,
       imageAspectRatio: aspectRatio,
     });
-  }, [aspectRatio, onProjectChange, openings, walls]);
+  }, [aspectRatio, backgroundScale, onProjectChange, openings, walls]);
 
   useEffect(() => {
     setRoomMeasurement(null);
@@ -1350,7 +1546,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     if (activeTool === 'multi-wall') return 'wall';
     if (selectedOpeningIndex !== null) return 'opening';
     if (selectedWallIndex !== null) return 'wall';
-    if (activeTool === 'door' || activeTool === 'window') return 'opening';
+    if (activeTool === 'door' || activeTool === 'window' || activeTool === 'window-floor') return 'opening';
     return 'wall';
   }, [activeTool, selectedOpeningIndex, selectedWallIndex]);
 
@@ -1404,6 +1600,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   const getWallLength = useCallback((wall: WallSegment) => {
     return Math.hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y);
   }, []);
+
+  const getCalibrationReferenceLength = useCallback((wall: WallSegment) => {
+    return getInteriorCalibrationSpanLength(wall, walls);
+  }, [walls]);
 
   const getSelectedWallsTotalLength = useCallback(() => {
     return selectedWallIndices.reduce((total, wallIndex) => {
@@ -1541,7 +1741,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   const getTraceImageBounds = useCallback(() => {
     if (!imageUrl) return null;
 
-    const height = TRACE_IMAGE_BASE_HEIGHT;
+    const height = TRACE_IMAGE_BASE_HEIGHT * backgroundScaleRef.current;
     const width = height * aspectRatioRef.current;
 
     return {
@@ -1772,17 +1972,15 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       };
     }
 
-    if (currentMode === 'trace') {
-      const imageBounds = getTraceImageBounds();
-      if (imageBounds) {
-        const rotatedBounds = getRotatedBounds(imageBounds.width, imageBounds.height, backgroundTransformRef.current);
-        return {
-          x: rotatedBounds.minX,
-          y: TRACE_CANVAS_HEIGHT - rotatedBounds.maxY,
-          width: Math.max(rotatedBounds.maxX - rotatedBounds.minX, 1),
-          height: Math.max(rotatedBounds.maxY - rotatedBounds.minY, 1),
-        };
-      }
+    const imageBounds = getTraceImageBounds();
+    if (imageBounds) {
+      const rotatedBounds = getRotatedBounds(imageBounds.width, imageBounds.height, backgroundTransformRef.current);
+      return {
+        x: rotatedBounds.minX,
+        y: canvasHeight - rotatedBounds.maxY,
+        width: Math.max(rotatedBounds.maxX - rotatedBounds.minX, 1),
+        height: Math.max(rotatedBounds.maxY - rotatedBounds.minY, 1),
+      };
     }
 
     const neutralBoxSize = 2000;
@@ -1949,7 +2147,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
 
   const getCurrentWallPreviewPoint = useCallback((): Point | null => {
     if (!currentStart) return null;
-    if (mode !== 'scale' || !isWallLengthInputActive || !lockedWallDirection) {
+    if (!isWallLengthInputActive || !lockedWallDirection) {
       return mousePos;
     }
 
@@ -1959,7 +2157,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       x: currentStart.x + lockedWallDirection.x * lengthCm,
       y: currentStart.y + lockedWallDirection.y * lengthCm,
     };
-  }, [currentStart, isWallLengthInputActive, lockedWallDirection, mode, mousePos, parseWallLengthMeters, wallLengthInputValue]);
+  }, [currentStart, isWallLengthInputActive, lockedWallDirection, mousePos, parseWallLengthMeters, wallLengthInputValue]);
 
   const commitWallSegment = useCallback((endPoint: Point) => {
     if (!currentStart) return;
@@ -1989,6 +2187,15 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     if (!currentStart || !previewPoint) return null;
     return Math.hypot(previewPoint.x - currentStart.x, previewPoint.y - currentStart.y);
   }, [currentStart, getCurrentWallPreviewPoint]);
+
+  const getReferenceCalibrationPreviewPoint = useCallback(() => {
+    if (!referenceCalibrationStart) return null;
+    const snapResult = getSnapResult(rawMousePos, false, {
+      anchor: referenceCalibrationStart,
+      allowAlignment: true,
+    });
+    return snapResult.point;
+  }, [getSnapResult, rawMousePos, referenceCalibrationStart]);
 
   const getDisplayedWallLength = useCallback(() => {
     if (isWallLengthInputActive) {
@@ -2203,7 +2410,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
           metrics.bodyHeight * scaleY,
         );
 
-        if (resolvedOpening.type === 'window') {
+        if (resolvedOpening.type === 'window' || resolvedOpening.type === 'window-floor') {
           context.strokeStyle = isSelected ? OPENING_SELECTION_COLOR : '#141414';
           context.lineWidth = 1.5 * scaleX;
           context.beginPath();
@@ -2215,14 +2422,16 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
             (resolvedOpening.width / 2 - metrics.lineInset) * scaleX,
             -metrics.windowLineOffset * scaleY,
           );
-          context.moveTo(
-            (-resolvedOpening.width / 2 + metrics.lineInset) * scaleX,
-            metrics.windowLineOffset * scaleY,
-          );
-          context.lineTo(
-            (resolvedOpening.width / 2 - metrics.lineInset) * scaleX,
-            metrics.windowLineOffset * scaleY,
-          );
+          if (resolvedOpening.type === 'window') {
+            context.moveTo(
+              (-resolvedOpening.width / 2 + metrics.lineInset) * scaleX,
+              metrics.windowLineOffset * scaleY,
+            );
+            context.lineTo(
+              (resolvedOpening.width / 2 - metrics.lineInset) * scaleX,
+              metrics.windowLineOffset * scaleY,
+            );
+          }
           context.stroke();
         }
 
@@ -2388,6 +2597,41 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
         return;
       }
 
+      if (isReferenceCalibration) {
+        if (referenceCalibrationSegment) {
+          return;
+        }
+
+        const snapResult = getSnapResult(rawPos, e.shiftKey, {
+          anchor: referenceCalibrationStart,
+          allowAlignment: Boolean(referenceCalibrationStart),
+        });
+
+        if (!referenceCalibrationStart) {
+          setReferenceCalibrationStart(snapResult.point);
+          setMousePos(snapResult.point);
+          setAlignmentGuides([]);
+          setActiveSnapNode(snapResult.snappedNode);
+          setSelectedWallIndex(null);
+          setSelectedOpeningIndex(null);
+          return;
+        }
+
+        if (Math.hypot(snapResult.point.x - referenceCalibrationStart.x, snapResult.point.y - referenceCalibrationStart.y) <= ROOM_GRAPH_EPSILON) {
+          return;
+        }
+
+        setReferenceCalibrationSegment({
+          start: referenceCalibrationStart,
+          end: snapResult.point,
+        });
+        setReferenceCalibrationStart(null);
+        setMousePos(snapResult.point);
+        setAlignmentGuides([]);
+        setActiveSnapNode(null);
+        return;
+      }
+
       // 0. Delete mode
       if (activeTool === 'delete') {
         if (e.shiftKey) {
@@ -2421,7 +2665,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
 
       // 1. If we are currently drawing, prioritize finishing the segment
       if (currentStart && activeTool === 'draw') {
-        if (mode === 'scale' && isWallLengthInputActive) {
+        if (isWallLengthInputActive) {
           return;
         }
         const snapResult = getSnapResult(rawPos, e.shiftKey, {
@@ -2503,7 +2747,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
 
         const wallAt = findWallAt(rawPos);
         if (wallAt !== null) {
-          if (isCalibrating) {
+          if (isCalibrating && calibrationMode === 'wall') {
             setCalibrationWallIndex(wallAt);
           }
           setSelectedWallIndex(wallAt);
@@ -2513,7 +2757,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
         }
         setSelectedWallIndex(null);
         setSelectedOpeningIndex(null);
-      } else if (activeTool === 'door' || activeTool === 'window') {
+      } else if (activeTool === 'door' || activeTool === 'window' || activeTool === 'window-floor') {
         // Place opening on wall using the preview position if available
         if (previewOpening) {
           const newOpening: Opening = {
@@ -2551,6 +2795,24 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   const handleMouseMove = (e: React.MouseEvent) => {
     const rawPos = getRelativePos(e);
     setRawMousePos(rawPos);
+
+    if (isReferenceCalibration) {
+      if (referenceCalibrationStart) {
+        const snapResult = getSnapResult(rawPos, e.shiftKey, {
+          anchor: referenceCalibrationStart,
+          allowAlignment: true,
+        });
+        setMousePos(snapResult.point);
+        setActiveSnapNode(snapResult.snappedNode);
+        setAlignmentGuides(snapResult.guides);
+        return;
+      }
+
+      setMousePos(rawPos);
+      setAlignmentGuides([]);
+      setActiveSnapNode(null);
+      return;
+    }
 
     if (isDragging) {
       const nextOffset = {
@@ -2658,7 +2920,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     }
 
     // Handle preview for doors/windows
-    if (activeTool === 'door' || activeTool === 'window') {
+    if (activeTool === 'door' || activeTool === 'window' || activeTool === 'window-floor') {
       let bestSnap: ReturnType<typeof getOpeningMetricsOnWall> = null;
       let minSnapDist = Infinity;
 
@@ -2704,7 +2966,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       return;
     }
 
-    if (mode === 'scale' && activeTool === 'draw' && currentStart && isWallLengthInputActive) {
+    if (activeTool === 'draw' && currentStart && isWallLengthInputActive) {
       setMousePos(rawPos);
       setAlignmentGuides([]);
       setActiveSnapNode(null);
@@ -2896,7 +3158,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     setCurrentOpeningWidth(newWidth);
   };
 
-  const applyScale = (factor: number) => {
+  const applyScale = (factor: number, options?: { preserveControlSizes?: boolean }) => {
     let nextFactor = factor;
     let scaledGeometry = scaleGeometry(wallsRef.current, openingsRef.current, nextFactor);
     let scaledBounds = getBoundsForGeometry(scaledGeometry.walls, scaledGeometry.openings);
@@ -2928,11 +3190,18 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       scaledGeometry = translateGeometry(scaledGeometry.walls, scaledGeometry.openings, dx, dy);
     }
 
+    setBackgroundScale((prev) => prev * nextFactor);
+    setBackgroundTransform((prev) => ({
+      ...prev,
+      x: prev.x * nextFactor,
+      y: prev.y * nextFactor,
+    }));
+
     pushHistorySnapshot({
       walls: scaledGeometry.walls,
       openings: scaledGeometry.openings,
-      currentThickness: currentThicknessRef.current * nextFactor,
-      currentOpeningWidth: currentOpeningWidthRef.current * nextFactor,
+      currentThickness: options?.preserveControlSizes ? currentThicknessRef.current : currentThicknessRef.current * nextFactor,
+      currentOpeningWidth: options?.preserveControlSizes ? currentOpeningWidthRef.current : currentOpeningWidthRef.current * nextFactor,
     }, {
       selection: getSelectionState(),
     });
@@ -3012,7 +3281,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     }, 1400);
   }, []);
 
-  const activateTool = useCallback((nextTool: 'draw' | 'select' | 'multi-wall' | 'door' | 'window' | 'delete') => {
+  const activateTool = useCallback((nextTool: 'draw' | 'select' | 'multi-wall' | 'door' | 'window' | 'window-floor' | 'delete') => {
     setActiveTool(nextTool);
     setIsRoomMeasureMode(false);
     setRoomMeasureMessage(null);
@@ -3111,7 +3380,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     onComplete({
       walls,
       openings,
-      suggestedScale: 1,
+      suggestedScale: backgroundScale,
       imageAspectRatio: aspectRatio
     });
   };
@@ -3119,10 +3388,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const isScaleWallDraft = mode === 'scale' && activeTool === 'draw' && currentStart !== null;
+      const isLengthDrivenWallDraft = activeTool === 'draw' && currentStart !== null;
       const wallLengthInputChar = getWallLengthInputChar(e);
 
-      if (isScaleWallDraft && wallLengthInputChar && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (isLengthDrivenWallDraft && wallLengthInputChar && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         if (!isWallLengthInputActive) {
           const previewPoint = getCurrentWallPreviewPoint() ?? getSnapResult(rawMousePos, e.shiftKey, {
@@ -3246,20 +3515,32 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [activateTool, activeTool, commitWallSegment, continuationDirections, createWallCascadeDeletion, currentOpeningWidth, currentStart, currentThickness, getControlContext, getControlValue, getCurrentWallPreviewPoint, getSnapResult, getWallLengthInputChar, handleRedo, isWallLengthInputActive, lockedWallDirection, mode, openings, parseWallLengthMeters, pushHistorySnapshot, rawMousePos, resetWallLengthInput, sanitizeWallLengthInput, selectedOpeningIndex, selectedWallIndex, wallLengthInputValue]);
+  }, [activateTool, activeTool, commitWallSegment, continuationDirections, createWallCascadeDeletion, currentOpeningWidth, currentStart, currentThickness, getControlContext, getControlValue, getCurrentWallPreviewPoint, getSnapResult, getWallLengthInputChar, handleRedo, isWallLengthInputActive, lockedWallDirection, openings, parseWallLengthMeters, pushHistorySnapshot, rawMousePos, resetWallLengthInput, sanitizeWallLengthInput, selectedOpeningIndex, selectedWallIndex, wallLengthInputValue, workflowStep]);
 
   const getToolInstruction = () => {
-    if (isCalibrating) return calibrationWallIndex === null ? "Select one wall to calibrate the scale" : "Enter the real length in the dialog below";
+    if (isReferenceCalibration) {
+      if (referenceCalibrationSegment) return "Enter the real length of the reference segment in the dialog below";
+      if (referenceCalibrationStart) return "Click the second point of the reference segment";
+      return "Click the first point of the reference segment";
+    }
+    if (isCalibrating) return calibrationWallIndex === null ? "Select one traced wall to recalibrate the scale" : "Enter the real internal span in the dialog below";
     if (isPrintModeActive) return printStatusMessage ?? "Print mode: position the A4 frame, then export the PDF.";
     if (isRoomMeasureMode) return roomMeasureMessage ?? "Room measure mode: click inside a closed room.";
     if (isMultiWallRotationMode) return "Rotation mode: CTRL + left click = rotate 15 degrees clockwise";
     if (isMultiWallRotationMode) return "Rotation mode: left click = 15° CCW, right click = 15° CW";
     if (isAdjustingBackground && hasBackground) return "Drag to move the reference • use rotate controls to straighten it";
     if (panMode || isDragging) return "Drag to move the view";
-    switch (activeTool) {
+    const isDrawToolActive = activeTool === 'draw';
+    if (isDrawToolActive) {
+      return workflowStep === 'scale'
+        ? (currentStart ? "Click for the second point of the reference segment â€¢ SHIFT = soft constraints" : "Click for the first point of the reference segment")
+        : (currentStart ? "Click for the second point â€¢ SHIFT = soft constraints" : "Click for the first wall point");
+    }
+    switch (activeTool as any) {
       case 'draw': return currentStart ? "Click for the second point • SHIFT = soft constraints" : "Click for the first wall point";
       case 'door': return "Click a wall to insert a door";
       case 'window': return "Click a wall to insert a window";
+      case 'window-floor': return "Click a wall to insert a floor window";
       case 'select': return "Drag nodes to edit • click to select";
       case 'multi-wall': return "Click walls to build a group • SHIFT + drag = marquee • drag to move";
       case 'delete': return "Click elements to remove them";
@@ -3319,21 +3600,29 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
             <div className="flex flex-col gap-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-bold uppercase tracking-widest opacity-40">Calibration</h3>
-                <button onClick={() => setIsCalibrating(false)} className="p-1 hover:bg-[#141414]/5 rounded-lg">
+                <button onClick={() => {
+                  setIsCalibrating(false);
+                  setCalibrationMode('wall');
+                  setCalibrationWallIndex(null);
+                  setReferenceCalibrationStart(null);
+                  setReferenceCalibrationSegment(null);
+                }} className="p-1 hover:bg-[#141414]/5 rounded-lg">
                   <Trash2 className="w-4 h-4 opacity-40" />
                 </button>
               </div>
               
               <p className="text-xs text-[#141414]/60 italic">
-                {calibrationWallIndex === null 
-                  ? "Select one wall and enter its real length. The whole drawing will scale proportionally."
-                  : "Enter the real length of the selected wall segment."}
+                {isReferenceCalibration
+                  ? "Draw a thin reference segment over a known distance, then enter its real measurement to lock the project scale."
+                  : calibrationWallIndex === null
+                    ? "Select one traced wall and enter its real internal span to manually recalibrate the project scale."
+                    : "Enter the real internal span of the selected wall segment."}
               </p>
 
-              {calibrationWallIndex !== null && (
+              {(isReferenceCalibration ? referenceCalibrationSegment !== null : calibrationWallIndex !== null) && (
                 <div className="space-y-4">
                   <div className="flex flex-col gap-1">
-                    <label className="text-[10px] font-bold uppercase opacity-40">Real wall length (m)</label>
+                    <label className="text-[10px] font-bold uppercase opacity-40">{isReferenceCalibration ? 'Real reference length (m)' : 'Real internal span (m)'}</label>
                     <div className="flex items-center gap-2">
                       <input 
                         type="number" 
@@ -3349,24 +3638,44 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                   
                   <button 
                     onClick={() => {
-                      const wall = walls[calibrationWallIndex];
-                      const dx = wall.end.x - wall.start.x;
-                      const dy = wall.end.y - wall.start.y;
-                      const currentPx = Math.sqrt(dx*dx + dy*dy);
+                      const currentPx = isReferenceCalibration && referenceCalibrationSegment
+                        ? Math.hypot(
+                            referenceCalibrationSegment.end.x - referenceCalibrationSegment.start.x,
+                            referenceCalibrationSegment.end.y - referenceCalibrationSegment.start.y,
+                          )
+                        : calibrationWallIndex !== null
+                          ? getCalibrationReferenceLength(walls[calibrationWallIndex])
+                          : 0;
                       const targetMeters = parseFloat(realLengthInput);
                       const targetCm = targetMeters * 100;
                       if (!isNaN(targetCm) && currentPx > 0) {
                         const factor = targetCm / currentPx;
-                        applyScale(factor);
+                        applyScale(factor, { preserveControlSizes: isPrimaryScaleStep });
+                        if (isReferenceCalibration) {
+                          setReferenceCalibrationSegment(null);
+                          setReferenceCalibrationStart(null);
+                          setActiveTool('draw');
+                        } else if (isPrimaryScaleStep) {
+                          pushHistorySnapshot({
+                            walls: [],
+                            openings: [],
+                            currentThickness: DEFAULT_WALL_THICKNESS,
+                            currentOpeningWidth: 80,
+                          }, {
+                            selection: null,
+                          });
+                          setActiveTool('draw');
+                        }
                         onScaleCalibrated();
                         setIsCalibrating(false);
+                        setCalibrationMode('wall');
                         setCalibrationWallIndex(null);
                         scheduleFitToView();
                       }
                     }}
                     className="w-full py-3 bg-[#141414] text-white rounded-xl text-xs font-bold shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all"
                   >
-                    {hasBackground && workflowStep === 'trace' ? 'CONVERT TO SCALE' : 'RECALIBRATE'}
+                    {isReferenceCalibration ? 'SET SCALE AND CONTINUE' : 'RECALIBRATE'}
                   </button>
                 </div>
               )}
@@ -3459,13 +3768,22 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                   <DoorIcon />
                   <span className="text-[8px] font-bold tracking-widest">DOOR</span>
                 </button>
-                <button 
-                  onClick={() => activateTool('window')}
-                  className={`w-full flex flex-col items-center justify-center gap-1 p-3 rounded-2xl transition-all ${activeTool === 'window' ? 'bg-[#141414] text-white shadow-md' : 'hover:bg-[#141414]/5 text-[#141414]'}`}
-                >
-                  <WindowIcon />
-                  <span className="text-[8px] font-bold tracking-widest">WINDOW</span>
-                </button>
+                <div className="grid grid-cols-2 gap-1">
+                  <button 
+                    onClick={() => activateTool('window')}
+                    className={`w-full flex flex-col items-center justify-center gap-1 p-3 rounded-2xl transition-all ${activeTool === 'window' ? 'bg-[#141414] text-white shadow-md' : 'hover:bg-[#141414]/5 text-[#141414]'}`}
+                  >
+                    <WindowIcon />
+                    <span className="text-[8px] font-bold tracking-widest">WINDOW</span>
+                  </button>
+                  <button 
+                    onClick={() => activateTool('window-floor')}
+                    className={`w-full flex flex-col items-center justify-center gap-1 p-3 rounded-2xl transition-all ${activeTool === 'window-floor' ? 'bg-[#141414] text-white shadow-md' : 'hover:bg-[#141414]/5 text-[#141414]'}`}
+                  >
+                    <FloorWindowIcon />
+                    <span className="text-[8px] font-bold tracking-[0.14em]">FULL HT</span>
+                  </button>
+                </div>
               </div>
             </div>
             <AnimatePresence>
@@ -3604,17 +3922,21 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
               <div className="space-y-1">
                 <button 
                   onClick={() => {
+                    setCalibrationMode('reference');
+                    setReferenceCalibrationStart(null);
+                    setReferenceCalibrationSegment(null);
+                    setCalibrationWallIndex(null);
                     setIsCalibrating(true);
-                    activateTool('select');
+                    activateTool('draw');
                   }}
                   className={`w-full min-h-[44px] px-3 py-2 rounded-2xl text-[9px] font-bold shadow-sm transition-all flex items-center justify-center gap-2 ${
-                    hasBackground && workflowStep === 'trace'
+                    workflowStep === 'scale' && hasBackground && !isScaleCalibrated
                       ? 'bg-emerald-500 text-white hover:bg-emerald-600' 
                       : 'bg-white border border-[#141414]/10 text-[#141414] hover:bg-[#141414]/5'
                   }`}
                 >
                   <Box className="w-3 h-3" />
-                  {hasBackground && workflowStep === 'trace' ? 'CONVERT' : 'RECAL'}
+                  {workflowStep === 'scale' && hasBackground && !isScaleCalibrated ? 'SET SCALE' : 'RECAL'}
                 </button>
 
                 {hasBackground && (
@@ -3719,7 +4041,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
         <div className="absolute top-6 right-6 z-30 w-[120px] space-y-3" onMouseDown={stopUiMouseDown}>
           <button 
             onClick={handleFinish}
-            disabled={walls.length === 0 || workflowStep !== 'scale' || !isScaleCalibrated}
+            disabled={walls.length === 0 || workflowStep !== 'trace' || !isScaleCalibrated}
             className="w-full rounded-[24px] bg-emerald-500 text-white px-4 py-3 text-[9px] font-bold shadow-xl backdrop-blur-md hover:scale-[1.02] hover:bg-emerald-600 transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:hover:scale-100"
           >
             <Check className="w-3 h-3" />
@@ -3992,7 +4314,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
             style={{ 
               width: mode === 'trace' ? `${TRACE_CANVAS_WIDTH}px` : `${SCALE_CANVAS_WIDTH}px`,
               height: mode === 'trace' ? `${TRACE_CANVAS_HEIGHT}px` : `${SCALE_CANVAS_HEIGHT}px`,
-              backgroundColor: mode === 'scale' ? 'white' : 'transparent'
+              backgroundColor: 'white'
             }}
           >
             {imageUrl && (
@@ -4022,7 +4344,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                         height={getTraceImageBounds()!.height}
                         preserveAspectRatio="none"
                         className="pointer-events-none"
-                        opacity={workflowStep === 'trace' ? 0.92 : 0.35}
+                        opacity={0.92}
                       />
                     </g>
                   </g>
@@ -4251,7 +4573,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                       className={`transition-all duration-200 ${isSelected ? 'opacity-100' : 'opacity-92'}`}
                     />
                     {/* Type indicator */}
-                    {resolvedOpening.type === 'window' ? (
+                    {resolvedOpening.type === 'window' || resolvedOpening.type === 'window-floor' ? (
                       <g>
                         <line
                           x1={-resolvedOpening.width / 2 + openingMetrics.lineInset}
@@ -4262,15 +4584,17 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                           strokeWidth="1.5"
                           vectorEffect="non-scaling-stroke"
                         />
-                        <line
-                          x1={-resolvedOpening.width / 2 + openingMetrics.lineInset}
-                          y1={openingMetrics.windowLineOffset}
-                          x2={resolvedOpening.width / 2 - openingMetrics.lineInset}
-                          y2={openingMetrics.windowLineOffset}
-                          stroke={isSelected ? OPENING_SELECTION_COLOR : "#141414"}
-                          strokeWidth="1.5"
-                          vectorEffect="non-scaling-stroke"
-                        />
+                        {resolvedOpening.type === 'window' && (
+                          <line
+                            x1={-resolvedOpening.width / 2 + openingMetrics.lineInset}
+                            y1={openingMetrics.windowLineOffset}
+                            x2={resolvedOpening.width / 2 - openingMetrics.lineInset}
+                            y2={openingMetrics.windowLineOffset}
+                            stroke={isSelected ? OPENING_SELECTION_COLOR : "#141414"}
+                            strokeWidth="1.5"
+                            vectorEffect="non-scaling-stroke"
+                          />
+                        )}
                       </g>
                     ) : null}
 
@@ -4319,8 +4643,38 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                 </g>
               )}
 
+              {isReferenceCalibration && (referenceCalibrationSegment || (referenceCalibrationStart && getReferenceCalibrationPreviewPoint())) && (
+                <g>
+                  <line
+                    x1={(referenceCalibrationSegment?.start ?? referenceCalibrationStart)!.x}
+                    y1={(referenceCalibrationSegment?.start ?? referenceCalibrationStart)!.y}
+                    x2={(referenceCalibrationSegment?.end ?? getReferenceCalibrationPreviewPoint()!)!.x}
+                    y2={(referenceCalibrationSegment?.end ?? getReferenceCalibrationPreviewPoint()!)!.y}
+                    stroke="#22C55E"
+                    strokeWidth="2"
+                    vectorEffect="non-scaling-stroke"
+                    className="opacity-92"
+                  />
+                </g>
+              )}
+
+              {!isReferenceCalibration && isCalibrating && calibrationMode === 'wall' && calibrationWallIndex !== null && walls[calibrationWallIndex] && (
+                <g>
+                  <line
+                    x1={walls[calibrationWallIndex].start.x}
+                    y1={walls[calibrationWallIndex].start.y}
+                    x2={walls[calibrationWallIndex].end.x}
+                    y2={walls[calibrationWallIndex].end.y}
+                    stroke="#22C55E"
+                    strokeWidth="2"
+                    vectorEffect="non-scaling-stroke"
+                    className="opacity-92"
+                  />
+                </g>
+              )}
+
               {/* Current Opening Preview */}
-              {(activeTool === 'door' || activeTool === 'window') && (
+              {(activeTool === 'door' || activeTool === 'window' || activeTool === 'window-floor') && (
                 <g transform={previewOpening 
                   ? `translate(${previewOpening.position.x}, ${previewOpening.position.y}) rotate(${previewOpening.rotation})` 
                   : `translate(${mousePos.x}, ${mousePos.y})`
@@ -4349,7 +4703,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                           vectorEffect="non-scaling-stroke"
                           className="opacity-70"
                         />
-                        {activeTool === 'window' && (
+                        {(activeTool === 'window' || activeTool === 'window-floor') && (
                           <>
                             <line
                               x1={-currentOpeningWidth / 2 + previewMetrics.lineInset}
@@ -4361,16 +4715,18 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                               strokeDasharray="4,4"
                               vectorEffect="non-scaling-stroke"
                             />
-                            <line
-                              x1={-currentOpeningWidth / 2 + previewMetrics.lineInset}
-                              y1={previewMetrics.windowLineOffset}
-                              x2={currentOpeningWidth / 2 - previewMetrics.lineInset}
-                              y2={previewMetrics.windowLineOffset}
-                              stroke={previewOpening ? "#10b981" : "#ef4444"}
-                              strokeWidth="1.5"
-                              strokeDasharray="4,4"
-                              vectorEffect="non-scaling-stroke"
-                            />
+                            {activeTool === 'window' && (
+                              <line
+                                x1={-currentOpeningWidth / 2 + previewMetrics.lineInset}
+                                y1={previewMetrics.windowLineOffset}
+                                x2={currentOpeningWidth / 2 - previewMetrics.lineInset}
+                                y2={previewMetrics.windowLineOffset}
+                                stroke={previewOpening ? "#10b981" : "#ef4444"}
+                                strokeWidth="1.5"
+                                strokeDasharray="4,4"
+                                vectorEffect="non-scaling-stroke"
+                              />
+                            )}
                           </>
                         )}
                       </>
@@ -4402,7 +4758,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                 );
               })}
               
-              {currentStart && !isNaN(currentStart.x) && !isNaN(currentStart.y) && (
+              {currentStart && !isReferenceCalibration && !isNaN(currentStart.x) && !isNaN(currentStart.y) && (
                 <circle cx={currentStart.x} cy={currentStart.y} r="4" fill="#141414" />
               )}
             </g>

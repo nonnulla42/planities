@@ -15,14 +15,14 @@ const steps: Array<{
   description: string;
 }> = [
   {
-    id: 'trace',
-    title: 'Trace',
-    description: 'Trace walls, doors, and windows from the uploaded file',
-  },
-  {
     id: 'scale',
     title: 'Scale',
-    description: 'Set a real measurement and work at scale',
+    description: 'Trace one known segment, enter its real length, and lock the project scale',
+  },
+  {
+    id: 'trace',
+    title: 'Trace',
+    description: 'Draw the full plan in real dimensions over the calibrated reference',
   },
   {
     id: '3d',
@@ -32,28 +32,28 @@ const steps: Array<{
 ];
 
 export const WorkflowStepper: React.FC<WorkflowStepperProps> = ({ currentStep, isScaleCalibrated, hasBackground }) => {
-  const visibleSteps = hasBackground ? steps : steps.filter((step) => step.id !== 'trace');
+  const visibleSteps = hasBackground ? steps : steps.filter((step) => step.id !== 'scale');
 
   const getStepState = (stepId: WorkflowStep) => {
-    if (!hasBackground && stepId === 'trace') {
+    if (!hasBackground && stepId === 'scale') {
       return 'skipped';
     }
 
-    if (stepId === 'trace') {
-      if (isScaleCalibrated || currentStep === 'scale' || currentStep === '3d') return 'completed';
-      if (currentStep === 'trace') return 'active';
+    if (stepId === 'scale') {
+      if (!hasBackground) return 'skipped';
+      if (isScaleCalibrated) return 'completed';
+      if (currentStep === 'scale') return 'active';
       return 'upcoming';
     }
 
-    if (stepId === 'scale') {
+    if (stepId === 'trace') {
       if (currentStep === '3d') return 'completed';
-      if (currentStep === 'scale') return 'active';
-      if (isScaleCalibrated) return 'upcoming';
-      return 'disabled';
+      if (currentStep === 'trace') return 'active';
+      return isScaleCalibrated || !hasBackground ? 'upcoming' : 'disabled';
     }
 
     if (currentStep === '3d') return 'active';
-    return isScaleCalibrated ? 'upcoming' : 'disabled';
+    return isScaleCalibrated || !hasBackground ? 'upcoming' : 'disabled';
   };
 
   return (

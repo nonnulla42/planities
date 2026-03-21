@@ -1,5 +1,5 @@
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Upload, Box, Eye, Move, ArrowLeft, Search, Hand, Plus, PersonStanding, FolderOpen, Download } from 'lucide-react';
+import { Upload, Box, Eye, Move, ArrowLeft, Hand, Plus, PersonStanding, FolderOpen, Download } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { FloorPlanData } from './services/geminiService';
 import { WorkflowStep, WorkflowStepper } from './components/WorkflowStepper';
@@ -34,6 +34,58 @@ const ScreenLoader = ({ label }: { label: string }) => (
     </div>
   </div>
 );
+
+const HERO_PLAN_IMAGE = '/hero-floorplan-2d.png';
+const HERO_SPACE_IMAGE = '/hero-space-3d.png';
+
+function HeroScreenshotCard({
+  src,
+  alt,
+  eyebrow,
+  title,
+  objectPosition = 'center',
+}: {
+  src: string;
+  alt: string;
+  eyebrow: string;
+  title: string;
+  objectPosition?: string;
+}) {
+  const [hasError, setHasError] = useState(false);
+
+  return (
+    <div className="group relative overflow-hidden rounded-[30px] border border-[#141414]/8 bg-white shadow-[0_24px_80px_rgba(20,20,20,0.08)]">
+      <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between border-b border-[#141414]/6 bg-white/88 px-5 py-4 backdrop-blur-md">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.24em] text-[#141414]/38">{eyebrow}</p>
+          <p className="mt-1 text-sm font-medium text-[#141414]/82">{title}</p>
+        </div>
+        <div className="h-2.5 w-2.5 rounded-full bg-[#141414]/12" />
+      </div>
+
+      <div className="relative aspect-[5/6] bg-[#F3F0EB]">
+        {!hasError ? (
+          <img
+            src={src}
+            alt={alt}
+            onError={() => setHasError(true)}
+            className="h-full w-full object-cover"
+            style={{ objectPosition }}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center bg-[linear-gradient(180deg,#F7F5F1_0%,#EFEBE5_100%)] px-8 text-center">
+            <div className="max-w-xs space-y-3">
+              <p className="text-[10px] uppercase tracking-[0.24em] text-[#141414]/35">Screenshot placeholder</p>
+              <p className="text-base leading-relaxed text-[#141414]/58">
+                Add the image file to <span className="font-medium text-[#141414]/72">{src}</span> to render this hero panel.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const [state, setState] = useState<AppState>('upload');
@@ -355,7 +407,7 @@ export default function App() {
         </header>
       )}
 
-      <main className="flex-1 min-h-0 flex flex-col">
+      <main className={`flex-1 min-h-0 flex flex-col ${state === 'upload' ? 'overflow-y-auto' : ''}`}>
         <AnimatePresence mode="wait">
           {state === 'upload' && (
             <motion.div
@@ -363,87 +415,114 @@ export default function App() {
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -20 }}
-              className="flex-1 flex flex-col items-center justify-center p-6"
+              className="flex-1 flex flex-col px-4 pb-8 pt-28 sm:px-6 sm:pb-10 sm:pt-32"
             >
-              <div className="max-w-2xl w-full space-y-12">
-                <div className="space-y-4 text-center md:text-left">
-                  <h2 className="text-6xl md:text-8xl font-medium tracking-tighter leading-[0.9]">
-                    From Paper <br />
-                    <span className="italic serif opacity-50">to Space.</span>
-                  </h2>
-                  <p className="text-xl opacity-60 max-w-md mx-auto md:mx-0">
-                    Upload a 2D floor plan, calibrate one known span, then trace the full layout at real scale.
-                  </p>
-                </div>
+              <div className="mx-auto flex w-full max-w-[1640px] flex-1 items-center">
+                <div className="w-full rounded-[36px] border border-[#141414]/7 bg-[#F5F2EC]/86 px-5 py-6 shadow-[0_30px_90px_rgba(20,20,20,0.08)] backdrop-blur-xl sm:px-8 sm:py-8 lg:px-10 lg:py-10">
+                  <div className="mb-6 flex flex-wrap items-center justify-center gap-3 text-center lg:mb-8 lg:justify-between lg:text-left">
+                    <div className="inline-flex items-center gap-3 rounded-full border border-[#141414]/8 bg-white/85 px-4 py-2 shadow-sm">
+                      <span className="text-[10px] uppercase tracking-[0.24em] text-[#141414]/38">2D plan</span>
+                      <span className="h-px w-6 bg-[#141414]/14" />
+                      <span className="text-[10px] uppercase tracking-[0.24em] text-[#141414]/62">Planities</span>
+                      <span className="h-px w-6 bg-[#141414]/14" />
+                      <span className="text-[10px] uppercase tracking-[0.24em] text-[#141414]/38">Walkable 3D</span>
+                    </div>
+                    <p className="max-w-xl text-sm leading-relaxed text-[#141414]/48">
+                      Minimal browser workflow for turning a floor plan into a space you can actually understand.
+                    </p>
+                  </div>
 
-                <div className="flex flex-col md:flex-row gap-6">
-                  <div className="relative group flex-1">
-                    <input
-                      type="file"
-                      accept="image/*,application/pdf"
-                      onChange={handleFileUpload}
-                      disabled={isProcessing}
-                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 disabled:cursor-not-allowed"
-                    />
-                    <div className={`border-2 border-dashed border-[#141414]/20 rounded-3xl p-12 flex flex-col items-center justify-center gap-6 transition-colors bg-white/50 backdrop-blur-sm h-full ${isProcessing ? 'opacity-50' : 'group-hover:border-[#141414]/40'}`}>
-                      <div className={`w-16 h-16 rounded-full bg-[#141414] text-white flex items-center justify-center transition-transform ${isProcessing ? 'animate-pulse' : 'group-hover:scale-110'}`}>
-                        {isProcessing ? (
-                          <div className="w-8 h-8 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                        ) : (
-                          <Upload className="w-8 h-8" />
-                        )}
+                  <div className="grid items-center gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(360px,480px)_minmax(0,1fr)] xl:gap-8">
+                    <div className="order-2 lg:order-1">
+                      <HeroScreenshotCard
+                        src={HERO_PLAN_IMAGE}
+                        alt="2D floor plan tracing workspace in Planities"
+                        eyebrow="Before"
+                        title="2D plan / trace workspace"
+                        objectPosition="34% center"
+                      />
+                    </div>
+
+                    <div className="order-1 px-1 text-center lg:order-2 lg:px-0 lg:text-left">
+                      <div className="mx-auto max-w-xl space-y-6 lg:mx-0">
+                        <div className="space-y-4">
+                          <p className="text-[10px] uppercase tracking-[0.32em] text-[#141414]/40">Spatial workflow</p>
+                          <h2 className="text-5xl font-medium leading-[0.92] tracking-[-0.06em] sm:text-6xl xl:text-7xl">
+                            Walk inside
+                            <br />
+                            <span className="italic serif text-[#141414]/72">a floor plan.</span>
+                          </h2>
+                          <p className="mx-auto max-w-lg text-base leading-7 text-[#141414]/62 sm:text-lg lg:mx-0">
+                            Turn a 2D drawing into a navigable 3D space in minutes.
+                            <br />
+                            No sign-up. Easy to learn. Ready to explore.
+                          </p>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <button
+                            onClick={() => openEditor(null)}
+                            className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-full bg-[#141414] px-6 py-3.5 text-sm font-medium text-white transition-all hover:bg-[#222222]"
+                          >
+                            <Plus className="h-4 w-4" />
+                            Open Planities
+                          </button>
+                          <label className={`inline-flex min-h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-full border border-[#141414]/10 bg-white/82 px-6 py-3.5 text-sm font-medium text-[#141414] transition-all hover:bg-white ${isProcessing ? 'pointer-events-none opacity-60' : ''}`}>
+                            {isProcessing ? (
+                              <div className="h-4 w-4 rounded-full border-2 border-[#141414]/20 border-t-[#141414] animate-spin" />
+                            ) : (
+                              <Upload className="h-4 w-4" />
+                            )}
+                            Upload floor plan
+                            <input
+                              type="file"
+                              accept="image/*,application/pdf"
+                              onChange={handleFileUpload}
+                              disabled={isProcessing}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+
+                        <ul className="space-y-3 rounded-[28px] border border-[#141414]/7 bg-white/72 p-5 text-left shadow-sm">
+                          <li className="flex gap-3 text-sm leading-6 text-[#141414]/72">
+                            <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-[#141414]/55" />
+                            <span>Upload a floor plan and trace it to scale, or create the space from scratch</span>
+                          </li>
+                          <li className="flex gap-3 text-sm leading-6 text-[#141414]/72">
+                            <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-[#141414]/55" />
+                            <span>Move quickly from 2D to 3D and walk through the rooms</span>
+                          </li>
+                          <li className="flex gap-3 text-sm leading-6 text-[#141414]/72">
+                            <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-[#141414]/55" />
+                            <span>Understand dimensions and proportions before visiting or designing</span>
+                          </li>
+                        </ul>
+
+                        <div className="space-y-3">
+                          <p className="text-sm leading-6 text-[#141414]/48">
+                            Created for home buyers, real estate agents and students to understand spaces faster.
+                          </p>
+                          <button
+                            onClick={triggerImportProject}
+                            className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full border border-[#141414]/12 bg-white px-5 py-3 text-sm font-medium text-[#141414] shadow-[0_12px_30px_rgba(20,20,20,0.07)] transition-all hover:border-[#141414]/20 hover:bg-[#FCFBF8] hover:shadow-[0_16px_38px_rgba(20,20,20,0.1)]"
+                          >
+                            <FolderOpen className="h-4 w-4" />
+                            Import project
+                          </button>
+                        </div>
                       </div>
-                      <div className="text-center">
-                        <p className="text-lg font-medium">
-                          {isProcessing ? 'Processing...' : 'Drag or click to upload'}
-                        </p>
-                        <p className="text-sm opacity-50">PNG, JPG, or PDF up to 10MB</p>
-                      </div>
                     </div>
-                  </div>
 
-                  <button
-                    onClick={() => openEditor(null)}
-                    className="flex-1 border-2 border-[#141414]/10 rounded-3xl p-12 flex flex-col items-center justify-center gap-6 hover:bg-white/50 transition-all group bg-white/30 backdrop-blur-sm"
-                  >
-                    <div className="w-16 h-16 rounded-full bg-white border border-[#141414]/10 flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
-                      <Plus className="w-8 h-8" />
+                    <div className="order-3">
+                      <HeroScreenshotCard
+                        src={HERO_SPACE_IMAGE}
+                        alt="Walkable 3D exploration view generated by Planities"
+                        eyebrow="After"
+                        title="3D result / exploration view"
+                        objectPosition="58% center"
+                      />
                     </div>
-                    <div className="text-center">
-                      <p className="text-lg font-medium">Start from scratch</p>
-                      <p className="text-sm opacity-50">Draw on a blank canvas at real scale</p>
-                    </div>
-                  </button>
-                </div>
-
-                <button
-                  onClick={triggerImportProject}
-                  className="w-full rounded-3xl border border-[#141414]/10 bg-white/45 px-6 py-4 text-sm font-medium text-[#141414] transition-all hover:bg-white/65"
-                >
-                  Import Project
-                </button>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-8 pt-12 border-t border-[#141414]/10">
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 text-xs font-mono uppercase opacity-50">
-                      <Search className="w-3 h-3" />
-                      Scale
-                    </div>
-                    <p className="text-sm">Trace one known segment first and enter its real measurement.</p>
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 text-xs font-mono uppercase opacity-50">
-                      <Box className="w-3 h-3" />
-                      Trace
-                    </div>
-                    <p className="text-sm">Draw the full plan at real size once the scale is locked.</p>
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 text-xs font-mono uppercase opacity-50">
-                      <Move className="w-3 h-3" />
-                      Explore
-                    </div>
-                    <p className="text-sm">Walk through the space and understand its proportions immediately.</p>
                   </div>
                 </div>
               </div>

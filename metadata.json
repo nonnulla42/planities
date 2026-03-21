@@ -1,0 +1,5 @@
+{
+  "name": "Plan2Scene 3D",
+  "description": "Convert 2D floor plans into navigable 3D spaces using AI analysis.",
+  "requestFramePermissions": ["pointer-lock"]
+}

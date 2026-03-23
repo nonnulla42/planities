@@ -19,7 +19,10 @@ const OPENING_MIN_HIT_SIZE_PX = 14;
 const OPENING_HIT_PADDING_PX = 8;
 const POINT_SNAP_RADIUS_PX = 14;
 const ALIGNMENT_SNAP_RADIUS_PX = 12;
-const POINT_HIT_RADIUS_PX = 16;
+const WALL_SEGMENT_MOUSE_HIT_PADDING_PX = 10;
+const WALL_SEGMENT_TOUCH_HIT_PADDING_PX = 18;
+const WALL_NODE_MOUSE_HIT_RADIUS_PX = 16;
+const WALL_NODE_TOUCH_HIT_RADIUS_PX = 36;
 const BACKGROUND_ROTATION_STEP = 1;
 const GUIDE_PANEL_TOP_MARGIN = 96;
 const GUIDE_PANEL_EDGE_MARGIN = 16;
@@ -28,12 +31,16 @@ const OPENING_SELECTION_COLOR = '#C65A46';
 const MULTI_WALL_ROTATION_STEP_DEGREES = 15;
 const TOUCH_LONG_PRESS_MS = 280;
 const TOUCH_MOVE_CANCEL_PX = 10;
+const UI_OVERLAY_EVENT_BLOCK_MS = 450;
 const ENDPOINT_VISUAL_RADIUS_PX = 4;
 const ENDPOINT_SELECTED_VISUAL_RADIUS_PX = 6;
 const MULTI_SELECTION_CENTROID_VISUAL_RADIUS_PX = 18;
 const MULTI_SELECTION_CENTROID_INNER_VISUAL_RADIUS_PX = 5;
-const TOUCH_PIVOT_HIT_RADIUS_PX = 75;
-const TOUCH_NODE_HIT_RADIUS_PX = 75;
+const MULTI_SELECTION_PIVOT_MOUSE_HIT_RADIUS_PX = 18;
+const MULTI_SELECTION_PIVOT_TOUCH_HIT_RADIUS_PX = 42;
+const MULTI_WALL_TOGGLE_CANCEL_THRESHOLD_PX = 5;
+const NODE_DRAG_START_MOUSE_THRESHOLD_PX = 6;
+const NODE_DRAG_START_TOUCH_THRESHOLD_PX = 6;
 const A4_PORTRAIT_CM = { width: 21, height: 29.7 };
 const PDF_PAGE_POINTS = { width: 595.28, height: 841.89 };
 let wallIdCounter = 0;
@@ -163,6 +170,12 @@ interface PendingMultiWallToggle {
   startClientY: number;
 }
 
+interface PendingPointDragState {
+  point: { wallIndex: number; type: 'start' | 'end' };
+  startClientX: number;
+  startClientY: number;
+}
+
 interface TouchPointerInfo {
   clientX: number;
   clientY: number;
@@ -180,7 +193,7 @@ interface TouchPressState {
     | { type: 'wall'; wallIndex: number }
     | { type: 'pivot' }
     | { type: 'empty' };
-  longPressTriggered: boolean;
+  dragActivated: boolean;
 }
 
 interface TouchGestureState {
@@ -234,8 +247,28 @@ interface SnapResolverOptions {
 }
 
 type DisplayUnit = 'cm' | 'm';
+type HandleTarget = 'wall-node' | 'multi-selection-pivot';
+type InputPrecision = 'mouse' | 'touch';
 
 const createWallId = () => `wall-${++wallIdCounter}`;
+
+const getHandleHitRadiusPx = (target: HandleTarget, input: InputPrecision): number => {
+  if (target === 'multi-selection-pivot') {
+    return input === 'touch'
+      ? MULTI_SELECTION_PIVOT_TOUCH_HIT_RADIUS_PX
+      : MULTI_SELECTION_PIVOT_MOUSE_HIT_RADIUS_PX;
+  }
+
+  return input === 'touch'
+    ? WALL_NODE_TOUCH_HIT_RADIUS_PX
+    : WALL_NODE_MOUSE_HIT_RADIUS_PX;
+};
+
+const getWallSegmentHitPaddingPx = (input: InputPrecision): number => (
+  input === 'touch'
+    ? WALL_SEGMENT_TOUCH_HIT_PADDING_PX
+    : WALL_SEGMENT_MOUSE_HIT_PADDING_PX
+);
 
 const clonePoint = (point: Point): Point => ({ x: point.x, y: point.y });
 
@@ -589,6 +622,7 @@ const GUIDE_PANEL_CONTENT: Record<'trace' | 'scale', Record<GuideGroup, GuidePan
 
 const ROOM_GRAPH_EPSILON = 1e-6;
 const CALIBRATION_SPAN_EPSILON = 1e-3;
+const UI_OVERLAY_SELECTOR = '[data-ui-overlay="true"]';
 
 const getPointKey = (point: Point) => `${point.x.toFixed(4)},${point.y.toFixed(4)}`;
 
@@ -1378,6 +1412,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   const touchPressRef = useRef<TouchPressState | null>(null);
   const touchGestureRef = useRef<TouchGestureState | null>(null);
   const touchLongPressTimeoutRef = useRef<number | null>(null);
+  const pendingPointDragRef = useRef<PendingPointDragState | null>(null);
   const [guideViewportTick, setGuideViewportTick] = useState(0);
 
   useEffect(() => {
@@ -2531,8 +2566,11 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     workflowStep,
   ]);
 
-  const findWallAt = (pos: Point): number | null => {
-    const threshold = 15;
+  const findWallAt = useCallback((pos: Point, input: InputPrecision = 'mouse'): number | null => {
+    let bestWallIndex: number | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    const hitPaddingWorld = getWorldDistanceForPixels(getWallSegmentHitPaddingPx(input));
+
     for (let i = 0; i < walls.length; i++) {
       const wall = walls[i];
       // Distance from point to line segment
@@ -2544,13 +2582,20 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
         Math.pow(pos.x - (wall.start.x + t * (wall.end.x - wall.start.x)), 2) +
         Math.pow(pos.y - (wall.start.y + t * (wall.end.y - wall.start.y)), 2)
       );
-      if (dist < threshold + wall.thickness / 20) return i;
+      const hitThreshold = wall.thickness / 2 + hitPaddingWorld;
+      if (dist <= hitThreshold && dist < bestDistance) {
+        bestWallIndex = i;
+        bestDistance = dist;
+      }
     }
-    return null;
-  };
+    return bestWallIndex;
+  }, [getWorldDistanceForPixels, walls]);
 
-  const findPointAt = useCallback((pos: Point, hitRadiusPx = POINT_HIT_RADIUS_PX): { wallIndex: number, type: 'start' | 'end' } | null => {
-    const threshold = getWorldDistanceForPixels(hitRadiusPx);
+  const findPointAt = useCallback((
+    pos: Point,
+    input: InputPrecision = 'mouse',
+  ): { wallIndex: number, type: 'start' | 'end' } | null => {
+    const threshold = getWorldDistanceForPixels(getHandleHitRadiusPx('wall-node', input));
     const searchOrder = selectedWallIndex !== null
       ? [selectedWallIndex, ...walls.map((_, index) => index).filter((index) => index !== selectedWallIndex)]
       : walls.map((_, index) => index);
@@ -2569,7 +2614,13 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     return null;
   }, [getWorldDistanceForPixels, selectedWallIndex, walls]);
 
-  const isTouchWithinWorldHandle = useCallback((clientX: number, clientY: number, point: Point, radiusPx: number) => {
+  const isScreenHandleHit = useCallback((
+    clientX: number,
+    clientY: number,
+    point: Point,
+    target: HandleTarget,
+    input: InputPrecision,
+  ) => {
     if (!containerRef.current) {
       return false;
     }
@@ -2581,7 +2632,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       clientY - container.top - screenPoint.y,
     );
 
-    return distance <= radiusPx;
+    return distance <= getHandleHitRadiusPx(target, input);
   }, [worldToScreen]);
 
   const findOpeningAt = (pos: Point): number | null => {
@@ -2656,6 +2707,36 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     touchPointersRef.current.clear();
   }, [clearTouchLongPress]);
 
+  const activateTouchDragTarget = useCallback((press: TouchPressState) => {
+    dragSnapshotRef.current = createSnapshot();
+
+    if (press.target.type === 'point') {
+      setDraggingPoint(press.target.point);
+      setSelectedWallIndex(press.target.point.wallIndex);
+      setSelectedOpeningIndex(null);
+      setCurrentThickness(wallsRef.current[press.target.point.wallIndex]?.thickness ?? currentThicknessRef.current);
+      return;
+    }
+
+    if (press.target.type === 'opening') {
+      setDraggingOpening(press.target.openingIndex);
+      setSelectedOpeningIndex(press.target.openingIndex);
+      setSelectedWallIndex(null);
+      setCurrentOpeningWidth(openingsRef.current[press.target.openingIndex]?.width ?? currentOpeningWidthRef.current);
+      return;
+    }
+
+    if (press.target.type === 'pivot' && selectedWallIndicesRef.current.length > 1) {
+      setDraggingWallGroup({
+        wallIndices: [...selectedWallIndicesRef.current],
+        startPointer: press.startWorld,
+        baseWalls: cloneWalls(wallsRef.current),
+      });
+      setSelectedWallIndex(null);
+      setSelectedOpeningIndex(null);
+    }
+  }, [createSnapshot]);
+
   const rotateSelectedWallsByAngle = useCallback((angleRad: number, baseWalls: WallSegment[]) => {
     if (!selectedWallsRotationPivot || selectedWallIndices.length < 2) {
       return;
@@ -2676,7 +2757,44 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     setWalls(rotatedWalls);
   }, [selectedWallIndices, selectedWallsRotationPivot]);
 
+  const uiOverlayEventBlockUntilRef = useRef(0);
+
+  const markUiOverlayInteraction = useCallback((event: Event | React.SyntheticEvent) => {
+    const nativeEvent = 'nativeEvent' in event ? event.nativeEvent : event;
+    const eventType = nativeEvent.type;
+    const pointerEvent = nativeEvent as PointerEvent;
+    if (eventType.startsWith('touch') || pointerEvent.pointerType === 'touch' || pointerEvent.pointerType === 'pen') {
+      uiOverlayEventBlockUntilRef.current = Date.now() + UI_OVERLAY_EVENT_BLOCK_MS;
+    }
+  }, []);
+
+  const isFromUiOverlayTarget = useCallback((target: EventTarget | null) => {
+    return target instanceof Element && Boolean(target.closest(UI_OVERLAY_SELECTOR));
+  }, []);
+
+  const shouldIgnoreSurfaceEvent = useCallback((
+    event: Pick<React.SyntheticEvent, 'target' | 'nativeEvent'>,
+    pointerType?: string,
+  ) => {
+    if (isFromUiOverlayTarget(event.target)) {
+      return true;
+    }
+
+    const nativeEvent = event.nativeEvent;
+    const nativePointerType = 'pointerType' in nativeEvent ? (nativeEvent as PointerEvent).pointerType : undefined;
+    const effectivePointerType = pointerType ?? nativePointerType;
+    if ((effectivePointerType === 'mouse' || effectivePointerType === undefined) && Date.now() < uiOverlayEventBlockUntilRef.current) {
+      return true;
+    }
+
+    return false;
+  }, [isFromUiOverlayTarget]);
+
   const handleMouseDown = (e: React.MouseEvent) => {
+    if (shouldIgnoreSurfaceEvent(e)) {
+      return;
+    }
+
     setIsMobileToolsOpen(false);
     setIsMobilePropertiesOpen(false);
     setMobileOverlayPanel(null);
@@ -2792,7 +2910,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
           });
           return;
         }
-        const wallAt = findWallAt(rawPos);
+        const wallAt = findWallAt(rawPos, 'mouse');
         if (wallAt !== null) {
           const cascadeDelete = createWallCascadeDeletion(wallAt);
           if (!cascadeDelete) return;
@@ -2828,7 +2946,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
           return;
         }
 
-        const wallAt = findWallAt(rawPos);
+        const wallAt = findWallAt(rawPos, 'mouse');
 
         if (e.shiftKey && wallAt === null) {
           setMarqueeSelection({ origin: rawPos, current: rawPos });
@@ -2866,10 +2984,22 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
 
       // 2. If not drawing, check tool behavior
       if (activeTool === 'select') {
-        const pointAt = findPointAt(rawPos);
+        const pointAt = findPointAt(rawPos, 'mouse');
+        const wallAt = findWallAt(rawPos, 'mouse');
+
         if (pointAt) {
-          dragSnapshotRef.current = createSnapshot();
-          setDraggingPoint(pointAt);
+          if (selectedWallIndexRef.current === pointAt.wallIndex) {
+            pendingPointDragRef.current = {
+              point: pointAt,
+              startClientX: e.clientX,
+              startClientY: e.clientY,
+            };
+            setSelectedWallIndex(pointAt.wallIndex);
+            setSelectedOpeningIndex(null);
+            setCurrentThickness(walls[pointAt.wallIndex].thickness);
+            return;
+          }
+
           setSelectedWallIndex(pointAt.wallIndex);
           setSelectedOpeningIndex(null);
           setCurrentThickness(walls[pointAt.wallIndex].thickness);
@@ -2886,7 +3016,6 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
           return;
         }
 
-        const wallAt = findWallAt(rawPos);
         if (wallAt !== null) {
           if (isCalibrating && calibrationMode === 'wall') {
             setCalibrationWallIndex(wallAt);
@@ -2934,6 +3063,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
+    if (shouldIgnoreSurfaceEvent(e)) {
+      return;
+    }
+
     const rawPos = getRelativePos(e);
     setRawMousePos(rawPos);
 
@@ -2984,8 +3117,19 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       setActiveSnapNode(null);
     } else if (pendingMultiWallToggle) {
       const moved = Math.hypot(e.clientX - pendingMultiWallToggle.startClientX, e.clientY - pendingMultiWallToggle.startClientY);
-      if (moved > 5) {
+      if (moved > MULTI_WALL_TOGGLE_CANCEL_THRESHOLD_PX) {
         setPendingMultiWallToggle(null);
+      }
+    } else if (pendingPointDragRef.current) {
+      const moved = Math.hypot(
+        e.clientX - pendingPointDragRef.current.startClientX,
+        e.clientY - pendingPointDragRef.current.startClientY,
+      );
+
+      if (moved >= NODE_DRAG_START_MOUSE_THRESHOLD_PX) {
+        dragSnapshotRef.current = createSnapshot();
+        setDraggingPoint(pendingPointDragRef.current.point);
+        pendingPointDragRef.current = null;
       }
     } else if (draggingWallGroup) {
       const snapResult = getSnapResult(rawPos, false, {
@@ -3129,6 +3273,8 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   };
 
   const handleMouseUp = () => {
+    pendingPointDragRef.current = null;
+
     if (draggingPrintFrame) {
       setDraggingPrintFrame(null);
     }
@@ -3218,12 +3364,20 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   };
 
   const handleWheel = (e: React.WheelEvent) => {
+    if (shouldIgnoreSurfaceEvent(e)) {
+      return;
+    }
+
     e.preventDefault();
     const zoomFactor = Math.exp(-e.deltaY * ZOOM_SENSITIVITY);
     zoomAtPoint(zoomRef.current * zoomFactor, e.clientX, e.clientY);
   };
 
   const handlePointerDown = (e: React.PointerEvent) => {
+    if (shouldIgnoreSurfaceEvent(e, e.pointerType)) {
+      return;
+    }
+
     if (e.pointerType === 'mouse') {
       return;
     }
@@ -3286,28 +3440,29 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     let target: TouchPressState['target'] = { type: 'empty' };
 
     if (activeTool === 'select') {
-      const pointAt = findPointAt(rawPos, TOUCH_NODE_HIT_RADIUS_PX);
-      if (pointAt) {
+      const pointAt = findPointAt(rawPos, 'touch');
+      const wallAt = findWallAt(rawPos, 'touch');
+      if (pointAt && selectedWallIndexRef.current === pointAt.wallIndex) {
         target = { type: 'point', point: pointAt };
       } else {
         const openingAt = findOpeningAt(rawPos);
         if (openingAt !== null) {
           target = { type: 'opening', openingIndex: openingAt };
         } else {
-          const wallAt = findWallAt(rawPos);
-          if (wallAt !== null) {
-            target = { type: 'wall', wallIndex: wallAt };
+          const selectableWallIndex = wallAt ?? pointAt?.wallIndex ?? null;
+          if (selectableWallIndex !== null) {
+            target = { type: 'wall', wallIndex: selectableWallIndex };
           }
         }
       }
     } else if (activeTool === 'multi-wall') {
       if (selectedWallsRotationPivot && selectedWallIndices.length > 1) {
-        if (isTouchWithinWorldHandle(e.clientX, e.clientY, selectedWallsRotationPivot, TOUCH_PIVOT_HIT_RADIUS_PX)) {
+        if (isScreenHandleHit(e.clientX, e.clientY, selectedWallsRotationPivot, 'multi-selection-pivot', 'touch')) {
           target = { type: 'pivot' };
         }
       }
       if (target.type === 'empty') {
-        const wallAt = findWallAt(rawPos);
+        const wallAt = findWallAt(rawPos, 'touch');
         if (wallAt !== null) {
           target = { type: 'wall', wallIndex: wallAt };
         }
@@ -3327,47 +3482,24 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       startClientY: e.clientY,
       startWorld: rawPos,
       target,
-      longPressTriggered: false,
+      dragActivated: false,
     };
 
-    if (target.type === 'point' || target.type === 'opening' || target.type === 'pivot') {
-      touchLongPressTimeoutRef.current = window.setTimeout(() => {
-        const press = touchPressRef.current;
-        if (!press || press.pointerId !== e.pointerId) {
-          return;
-        }
-
-        touchPressRef.current = {
-          ...press,
-          longPressTriggered: true,
-        };
-
-        dragSnapshotRef.current = createSnapshot();
-
-        if (press.target.type === 'point') {
-          setDraggingPoint(press.target.point);
-          setSelectedWallIndex(press.target.point.wallIndex);
-          setSelectedOpeningIndex(null);
-          setCurrentThickness(wallsRef.current[press.target.point.wallIndex]?.thickness ?? currentThicknessRef.current);
-        } else if (press.target.type === 'opening') {
-          setDraggingOpening(press.target.openingIndex);
-          setSelectedOpeningIndex(press.target.openingIndex);
-          setSelectedWallIndex(null);
-          setCurrentOpeningWidth(openingsRef.current[press.target.openingIndex]?.width ?? currentOpeningWidthRef.current);
-        } else if (press.target.type === 'pivot' && selectedWallIndices.length > 1) {
-          setDraggingWallGroup({
-            wallIndices: [...selectedWallIndices],
-            startPointer: press.startWorld,
-            baseWalls: cloneWalls(wallsRef.current),
-          });
-          setSelectedWallIndex(null);
-          setSelectedOpeningIndex(null);
-        }
-      }, TOUCH_LONG_PRESS_MS);
+    if (target.type === 'opening' || target.type === 'pivot') {
+      const activatedPress = {
+        ...touchPressRef.current,
+        dragActivated: true,
+      } as TouchPressState;
+      touchPressRef.current = activatedPress;
+      activateTouchDragTarget(activatedPress);
     }
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
+    if (shouldIgnoreSurfaceEvent(e, e.pointerType)) {
+      return;
+    }
+
     if (e.pointerType === 'mouse' || !touchPointersRef.current.has(e.pointerId)) {
       return;
     }
@@ -3437,11 +3569,18 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     const press = touchPressRef.current;
     if (press) {
       const moved = Math.hypot(e.clientX - press.startClientX, e.clientY - press.startClientY);
-      if (!press.longPressTriggered && moved > TOUCH_MOVE_CANCEL_PX) {
+      if (!press.dragActivated && press.target.type === 'point' && moved >= NODE_DRAG_START_TOUCH_THRESHOLD_PX) {
+        const activatedPress = {
+          ...press,
+          dragActivated: true,
+        };
+        touchPressRef.current = activatedPress;
+        activateTouchDragTarget(activatedPress);
+      } else if (!press.dragActivated && moved > TOUCH_MOVE_CANCEL_PX) {
         clearTouchLongPress();
       }
 
-      if (press.longPressTriggered) {
+      if (touchPressRef.current?.dragActivated) {
         if (draggingWallGroup) {
           const snapResult = getSnapResult(rawPos, false, {
             allowAlignment: true,
@@ -3531,6 +3670,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
+    if (shouldIgnoreSurfaceEvent(e, e.pointerType)) {
+      return;
+    }
+
     if (e.pointerType === 'mouse') {
       return;
     }
@@ -3564,7 +3707,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     const moved = Math.hypot(e.clientX - press.startClientX, e.clientY - press.startClientY);
     touchPressRef.current = null;
 
-    if (press.longPressTriggered) {
+    if (press.dragActivated) {
       handleMouseUp();
       return;
     }
@@ -3629,7 +3772,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
         pushHistorySnapshot({ openings: openings.filter((_, i) => i !== openingAt) }, { selection: null });
         return;
       }
-      const wallAt = findWallAt(rawPos);
+      const wallAt = findWallAt(rawPos, 'touch');
       if (wallAt !== null) {
         const cascadeDelete = createWallCascadeDeletion(wallAt);
         if (cascadeDelete) {
@@ -3721,6 +3864,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   };
 
   const handlePointerCancel = (e: React.PointerEvent) => {
+    if (shouldIgnoreSurfaceEvent(e, e.pointerType)) {
+      return;
+    }
+
     if (e.pointerType === 'mouse') {
       return;
     }
@@ -3730,10 +3877,14 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   };
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    if (shouldIgnoreSurfaceEvent(e)) {
+      return;
+    }
+
     if (isMultiWallRotationMode) {
       e.preventDefault();
     }
-  }, [isMultiWallRotationMode]);
+  }, [isMultiWallRotationMode, shouldIgnoreSurfaceEvent]);
 
   const handleUndo = () => {
     if (currentStart) {
@@ -3910,31 +4061,38 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
 
   const stopUiMouseDown = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-  }, []);
+    markUiOverlayInteraction(e);
+  }, [markUiOverlayInteraction]);
 
   const stopUiMouseUp = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-  }, []);
+    markUiOverlayInteraction(e);
+  }, [markUiOverlayInteraction]);
 
   const stopUiClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-  }, []);
+    markUiOverlayInteraction(e);
+  }, [markUiOverlayInteraction]);
 
   const stopUiPointerDown = useCallback((e: React.PointerEvent) => {
     e.stopPropagation();
-  }, []);
+    markUiOverlayInteraction(e);
+  }, [markUiOverlayInteraction]);
 
   const stopUiPointerUp = useCallback((e: React.PointerEvent) => {
     e.stopPropagation();
-  }, []);
+    markUiOverlayInteraction(e);
+  }, [markUiOverlayInteraction]);
 
   const stopUiTouchStart = useCallback((e: React.TouchEvent) => {
     e.stopPropagation();
-  }, []);
+    markUiOverlayInteraction(e);
+  }, [markUiOverlayInteraction]);
 
   const stopUiTouchEnd = useCallback((e: React.TouchEvent) => {
     e.stopPropagation();
-  }, []);
+    markUiOverlayInteraction(e);
+  }, [markUiOverlayInteraction]);
 
   const stopUiWheel = useCallback((e: React.WheelEvent) => {
     e.stopPropagation();
@@ -4431,8 +4589,22 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
+            data-ui-overlay="true"
             className="absolute inset-0 z-40 bg-[#141414]/28 backdrop-blur-[2px] md:hidden"
-            onMouseDown={() => {
+            onMouseDown={(event) => {
+              stopUiMouseDown(event);
+              setIsMobileToolsOpen(false);
+              setIsMobilePropertiesOpen(false);
+              setMobileOverlayPanel(null);
+            }}
+            onPointerDown={(event) => {
+              stopUiPointerDown(event);
+              setIsMobileToolsOpen(false);
+              setIsMobilePropertiesOpen(false);
+              setMobileOverlayPanel(null);
+            }}
+            onTouchStart={(event) => {
+              stopUiTouchStart(event);
               setIsMobileToolsOpen(false);
               setIsMobilePropertiesOpen(false);
               setMobileOverlayPanel(null);
@@ -4458,7 +4630,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
             : (panMode ? (isDragging ? 'grabbing' : 'grab') : (draggingPoint || draggingWallGroup ? 'grabbing' : (activeTool === 'draw' ? 'crosshair' : (activeTool === 'multi-wall' ? 'grab' : 'default')))) 
         }}
       >
-        <div className="absolute left-3 right-3 top-3 z-30 grid grid-cols-[minmax(0,1fr)_auto_auto_minmax(0,1fr)] items-center gap-2 md:hidden" onMouseDown={stopUiMouseDown} onMouseUp={stopUiMouseUp} onClick={stopUiClick} onPointerDown={stopUiPointerDown} onPointerUp={stopUiPointerUp} onTouchStart={stopUiTouchStart} onTouchEnd={stopUiTouchEnd}>
+        <div data-ui-overlay="true" className="absolute left-3 right-3 top-3 z-30 grid grid-cols-[minmax(0,1fr)_auto_auto_minmax(0,1fr)] items-center gap-2 md:hidden" onMouseDown={stopUiMouseDown} onMouseUp={stopUiMouseUp} onClick={stopUiClick} onPointerDown={stopUiPointerDown} onPointerUp={stopUiPointerUp} onTouchStart={stopUiTouchStart} onTouchEnd={stopUiTouchEnd}>
           <button
             type="button"
             onClick={() => {
@@ -4516,6 +4688,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
               initial={{ opacity: 0, x: -24 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -24 }}
+              data-ui-overlay="true"
               className="absolute left-3 top-16 z-50 max-h-[calc(100dvh-6.5rem)] w-[min(20rem,calc(100%-3rem))] overflow-y-auto rounded-[28px] border border-[#141414]/10 bg-white/95 p-4 pb-5 shadow-2xl backdrop-blur-md md:hidden"
               onMouseDown={stopUiMouseDown}
               onMouseUp={stopUiMouseUp}
@@ -4627,6 +4800,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
               initial={{ opacity: 0, x: 24 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: 24 }}
+              data-ui-overlay="true"
               className="absolute right-3 top-16 z-50 max-h-[calc(100dvh-6.5rem)] w-[min(22rem,70vw)] max-w-[calc(100%-3rem)] overflow-y-auto rounded-[28px] border border-[#141414]/10 bg-white/95 p-4 pb-5 shadow-2xl backdrop-blur-md md:hidden"
               onMouseDown={stopUiMouseDown}
               onMouseUp={stopUiMouseUp}
@@ -4797,6 +4971,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
               initial={{ opacity: 0, y: 24 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 24 }}
+              data-ui-overlay="true"
               className="absolute inset-x-3 top-16 z-50 max-h-[calc(100dvh-6.5rem)] overflow-y-auto rounded-[28px] border border-[#141414]/10 bg-white/96 p-4 pb-6 shadow-2xl backdrop-blur-md md:hidden"
               onMouseDown={stopUiMouseDown}
               onMouseUp={stopUiMouseUp}
@@ -4874,6 +5049,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
               initial={{ opacity: 0, y: 24 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 24 }}
+              data-ui-overlay="true"
               className="absolute inset-x-3 top-16 z-50 max-h-[calc(100dvh-6.5rem)] overflow-y-auto rounded-[28px] border border-[#141414]/10 bg-white/96 p-4 pb-6 shadow-2xl backdrop-blur-md md:hidden"
               onMouseDown={stopUiMouseDown}
               onMouseUp={stopUiMouseUp}
@@ -5524,6 +5700,40 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
           </div>
 
         </div>
+        {activeTool === 'multi-wall' && selectedWallIndices.length > 1 && (
+          <div
+            data-ui-overlay="true"
+            className="absolute bottom-16 left-3 right-3 z-30 flex items-center justify-center md:hidden"
+            onMouseDown={stopUiMouseDown}
+            onMouseUp={stopUiMouseUp}
+            onClick={stopUiClick}
+            onPointerDown={stopUiPointerDown}
+            onPointerUp={stopUiPointerUp}
+            onTouchStart={stopUiTouchStart}
+            onTouchEnd={stopUiTouchEnd}
+          >
+            <div className="flex w-full max-w-[18rem] items-center gap-2 rounded-[24px] border border-[#141414]/10 bg-white/92 p-2 shadow-xl backdrop-blur-md">
+              <button
+                type="button"
+                onClick={() => rotateSelectedWalls('cw')}
+                className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-2xl bg-[#141414]/5 px-4 py-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[#141414]"
+                aria-label="Rotate selection left"
+              >
+                <RotateCcw className="h-4 w-4" />
+                Left
+              </button>
+              <button
+                type="button"
+                onClick={() => rotateSelectedWalls('ccw')}
+                className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-2xl bg-[#141414]/5 px-4 py-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[#141414]"
+                aria-label="Rotate selection right"
+              >
+                Right
+                <RotateCw className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        )}
         {/* Status Bar */}
         <div className="absolute bottom-3 left-3 right-3 z-20 flex items-center justify-center gap-3 rounded-full border border-white/10 bg-[#141414]/80 px-3 py-1.5 text-white shadow-xl backdrop-blur-md md:bottom-6 md:left-1/2 md:right-auto md:-translate-x-1/2 md:px-6 md:py-2">
           <p className="max-w-full truncate text-[9px] font-mono uppercase tracking-[0.16em] opacity-80 md:text-[10px] md:tracking-[0.2em]">

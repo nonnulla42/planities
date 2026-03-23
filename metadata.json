@@ -1,0 +1,5 @@
+{
+  "name": "Planities",
+  "description": "Upload a 2D floor plan, trace the walls, and turn it into a navigable 3D space.",
+  "requestFramePermissions": ["pointer-lock"]
+}

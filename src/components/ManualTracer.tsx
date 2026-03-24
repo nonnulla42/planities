@@ -34,6 +34,7 @@ const TOUCH_MOVE_CANCEL_PX = 10;
 const UI_OVERLAY_EVENT_BLOCK_MS = 450;
 const ENDPOINT_VISUAL_RADIUS_PX = 4;
 const ENDPOINT_SELECTED_VISUAL_RADIUS_PX = 6;
+const MOBILE_DIRECTIONAL_SNAP_TOLERANCE_DEGREES = 2;
 const MULTI_SELECTION_CENTROID_VISUAL_RADIUS_PX = 18;
 const MULTI_SELECTION_CENTROID_INNER_VISUAL_RADIUS_PX = 5;
 const MULTI_SELECTION_PIVOT_MOUSE_HIT_RADIUS_PX = 18;
@@ -146,6 +147,7 @@ interface SnapResult {
   point: Point;
   guides: AlignmentGuide[];
   snappedNode: SnapNode | null;
+  directionalSnapLabel?: string | null;
 }
 
 interface LockedWallDirection {
@@ -244,6 +246,7 @@ interface SnapResolverOptions {
   excludeWallIndices?: number[];
   allowAlignment?: boolean;
   continuationDirections?: LockedWallDirection[] | null;
+  enableDirectionalSnap?: boolean;
 }
 
 type DisplayUnit = 'cm' | 'm';
@@ -317,6 +320,83 @@ const dedupeDirections = (directions: LockedWallDirection[]): LockedWallDirectio
   });
 
   return unique;
+};
+
+const DEFAULT_DIRECTIONAL_SNAP_DIRECTIONS: LockedWallDirection[] = dedupeDirections([
+  { x: 1, y: 0 },
+  { x: -1, y: 0 },
+  { x: 0, y: 1 },
+  { x: 0, y: -1 },
+  { x: 1, y: 1 },
+  { x: -1, y: -1 },
+  { x: 1, y: -1 },
+  { x: -1, y: 1 },
+]);
+
+const getDirectionalSnapLabel = (direction: LockedWallDirection): string => {
+  const normalized = normalizeVector(direction);
+  if (!normalized) {
+    return 'Snap';
+  }
+
+  if (Math.abs(normalized.x) > 0.92) {
+    return '0 deg';
+  }
+
+  if (Math.abs(normalized.y) > 0.92) {
+    return '90 deg';
+  }
+
+  return normalized.x * normalized.y >= 0 ? '45 deg' : '135 deg';
+};
+
+const getSoftDirectionalSnap = (
+  anchor: Point,
+  target: Point,
+  directionPool?: LockedWallDirection[] | null,
+): { point: Point; label: string } | null => {
+  const dx = target.x - anchor.x;
+  const dy = target.y - anchor.y;
+  const distance = Math.hypot(dx, dy);
+
+  if (distance === 0) {
+    return null;
+  }
+
+  const candidateDirections = directionPool && directionPool.length > 0
+    ? directionPool
+    : DEFAULT_DIRECTIONAL_SNAP_DIRECTIONS;
+
+  let bestDirection: LockedWallDirection | null = null;
+  let bestDot = Number.NEGATIVE_INFINITY;
+
+  candidateDirections.forEach((direction) => {
+    const normalized = normalizeVector(direction);
+    if (!normalized) return;
+
+    const dot = (dx / distance) * normalized.x + (dy / distance) * normalized.y;
+    if (dot > bestDot) {
+      bestDot = dot;
+      bestDirection = normalized;
+    }
+  });
+
+  if (!bestDirection) {
+    return null;
+  }
+
+  const toleranceRadians = THREE.MathUtils.degToRad(MOBILE_DIRECTIONAL_SNAP_TOLERANCE_DEGREES);
+  if (bestDot < Math.cos(toleranceRadians)) {
+    return null;
+  }
+
+  return {
+    point: {
+      x: anchor.x + bestDirection.x * distance,
+      y: anchor.y + bestDirection.y * distance,
+    },
+    label: getDirectionalSnapLabel(bestDirection),
+  };
 };
 
 const constrainPointToDirections = (
@@ -419,7 +499,7 @@ const GUIDE_PANEL_CONTENT: Record<'trace' | 'scale', Record<GuideGroup, GuidePan
           description: [
             'Click to start a wall.',
             'Click again to place the endpoint and trace the full layout at real scale.',
-            'Hold SHIFT to constrain drawing to horizontal, vertical, 45° diagonals, and the perpendicular direction relative to the previously drawn wall.',
+            'Hold SHIFT to constrain drawing to horizontal, vertical, 45 deg diagonals, and the perpendicular direction relative to the previously drawn wall.',
           ],
         },
         {
@@ -524,7 +604,7 @@ const GUIDE_PANEL_CONTENT: Record<'trace' | 'scale', Record<GuideGroup, GuidePan
           description: [
             'Trace one simple reference segment over a wall or span with a known real measurement.',
             'Click again to place the endpoint, or type the reference length while drawing.',
-            'Hold SHIFT to constrain drawing to horizontal, vertical, 45° diagonals, and the perpendicular direction relative to the previously drawn wall.',
+            'Hold SHIFT to constrain drawing to horizontal, vertical, 45 deg diagonals, and the perpendicular direction relative to the previously drawn wall.',
           ],
         },
         {
@@ -612,7 +692,7 @@ const GUIDE_PANEL_CONTENT: Record<'trace' | 'scale', Record<GuideGroup, GuidePan
         {
           label: 'Reset rotation',
           description: [
-            'Restore the background’s original rotation only.',
+            "Restore the background's original rotation only.",
           ],
         },
       ],
@@ -1338,7 +1418,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   const [isWallLengthInputActive, setIsWallLengthInputActive] = useState(false);
   const [wallLengthInputValue, setWallLengthInputValue] = useState('');
   const [lockedWallDirection, setLockedWallDirection] = useState<LockedWallDirection | null>(null);
+  const [isMobileWallLengthInputOpen, setIsMobileWallLengthInputOpen] = useState(false);
+  const [mobileLockedPreviewLengthCm, setMobileLockedPreviewLengthCm] = useState<number | null>(null);
   const [continuationDirections, setContinuationDirections] = useState<LockedWallDirection[] | null>(null);
+  const [activeDirectionalSnapLabel, setActiveDirectionalSnapLabel] = useState<string | null>(null);
   const [isRoomMeasureMode, setIsRoomMeasureMode] = useState(false);
   const [roomMeasurement, setRoomMeasurement] = useState<RoomMeasurementResult | null>(null);
   const [roomMeasureMessage, setRoomMeasureMessage] = useState<string | null>(null);
@@ -1352,6 +1435,13 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   const [isMobileToolsOpen, setIsMobileToolsOpen] = useState(false);
   const [isMobilePropertiesOpen, setIsMobilePropertiesOpen] = useState(false);
   const [mobileOverlayPanel, setMobileOverlayPanel] = useState<'measure' | 'print' | null>(null);
+  const [isMobileViewport, setIsMobileViewport] = useState(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+
+    return window.matchMedia('(max-width: 767px)').matches;
+  });
   
   // Mode & Scaling
   const [isCalibrating, setIsCalibrating] = useState(false);
@@ -1413,6 +1503,8 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   const touchGestureRef = useRef<TouchGestureState | null>(null);
   const touchLongPressTimeoutRef = useRef<number | null>(null);
   const pendingPointDragRef = useRef<PendingPointDragState | null>(null);
+  const mobileWallLengthInputRef = useRef<HTMLInputElement>(null);
+  const desktopWallDraftDirectionRef = useRef<LockedWallDirection | null>(null);
   const [guideViewportTick, setGuideViewportTick] = useState(0);
 
   useEffect(() => {
@@ -1479,6 +1571,27 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   useEffect(() => {
     aspectRatioRef.current = aspectRatio;
   }, [aspectRatio]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return undefined;
+    }
+
+    const mediaQuery = window.matchMedia('(max-width: 767px)');
+    const updateViewportMode = () => {
+      setIsMobileViewport(mediaQuery.matches);
+    };
+
+    updateViewportMode();
+
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', updateViewportMode);
+      return () => mediaQuery.removeEventListener('change', updateViewportMode);
+    }
+
+    mediaQuery.addListener(updateViewportMode);
+    return () => mediaQuery.removeListener(updateViewportMode);
+  }, []);
 
   useEffect(() => {
     currentThicknessRef.current = currentThickness;
@@ -1789,6 +1902,9 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     setIsWallLengthInputActive(false);
     setWallLengthInputValue('');
     setLockedWallDirection(null);
+    setIsMobileWallLengthInputOpen(false);
+    setMobileLockedPreviewLengthCm(null);
+    setActiveDirectionalSnapLabel(null);
   }, []);
 
   const sanitizeWallLengthInput = useCallback((value: string) => {
@@ -1810,6 +1926,13 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       return event.code.replace('Numpad', '');
     }
 
+    // Some desktop layouts/browsers report shifted digits more reliably via `key`
+    // while keeping the same wall-drawing intent. Shift should constrain geometry,
+    // not block numeric length entry.
+    if (/^[0-9]$/.test(event.key)) {
+      return event.key;
+    }
+
     if (event.code === 'NumpadDecimal' || event.key === '.' || event.key === ',') {
       return '.';
     }
@@ -1822,6 +1945,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     if (Number.isNaN(parsed) || parsed <= 0) return null;
     return parsed;
   }, []);
+
 
   const getTraceImageBounds = useCallback(() => {
     if (!imageUrl) return null;
@@ -2175,6 +2299,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
 
     let snapped = { ...pos };
     let snappedNode: SnapNode | null = null;
+    let directionalSnapLabel: string | null = null;
 
     const endpointCandidates = allNodes.filter((node) => node.kind === 'endpoint');
     const midpointCandidates = allNodes.filter((node) => node.kind === 'midpoint');
@@ -2202,9 +2327,23 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       snapped = { ...snappedNode.point };
     }
 
-    if (!snappedNode && isShiftPressed && anchor) {
+    if (!snappedNode && anchor) {
       const directionPool = continuationDirections ?? options?.continuationDirections ?? null;
-      snapped = constrainPointToDirections(anchor, snapped, directionPool);
+
+      if (isShiftPressed) {
+        snapped = constrainPointToDirections(anchor, snapped, directionPool);
+      } else if (options?.enableDirectionalSnap) {
+        const softDirectionalSnap = getSoftDirectionalSnap(
+          anchor,
+          snapped,
+          dedupeDirections([...(directionPool ?? []), ...DEFAULT_DIRECTIONAL_SNAP_DIRECTIONS]),
+        );
+
+        if (softDirectionalSnap) {
+          snapped = softDirectionalSnap.point;
+          directionalSnapLabel = softDirectionalSnap.label;
+        }
+      }
     }
 
     const guides: AlignmentGuide[] = [];
@@ -2239,7 +2378,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       }
     }
 
-    return { point: snapped, guides, snappedNode };
+    return { point: snapped, guides, snappedNode, directionalSnapLabel };
   }, [continuationDirections, getSnapNodes, getWorldDistanceForPixels]);
 
   const getCurrentWallPreviewPoint = useCallback((): Point | null => {
@@ -2249,12 +2388,49 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     }
 
     const typedMeters = parseWallLengthMeters(wallLengthInputValue);
-    const lengthCm = typedMeters !== null ? typedMeters * 100 : 0;
+    const lengthCm = typedMeters !== null
+      ? typedMeters * 100
+      : isMobileWallLengthInputOpen
+        ? (mobileLockedPreviewLengthCm ?? 0)
+        : 0;
     return {
       x: currentStart.x + lockedWallDirection.x * lengthCm,
       y: currentStart.y + lockedWallDirection.y * lengthCm,
     };
-  }, [currentStart, isWallLengthInputActive, lockedWallDirection, mousePos, parseWallLengthMeters, wallLengthInputValue]);
+  }, [
+    currentStart,
+    isMobileWallLengthInputOpen,
+    isWallLengthInputActive,
+    lockedWallDirection,
+    mobileLockedPreviewLengthCm,
+    mousePos,
+    parseWallLengthMeters,
+    wallLengthInputValue,
+  ]);
+
+  const beginMobileWallLengthInput = useCallback(() => {
+    if (activeTool !== 'draw' || !currentStart) {
+      return;
+    }
+
+    const previewPoint = getCurrentWallPreviewPoint();
+    if (!previewPoint) {
+      return;
+    }
+
+    const direction = normalizeDirection(currentStart, previewPoint);
+    if (!direction) {
+      return;
+    }
+
+    setLockedWallDirection(direction);
+    setMobileLockedPreviewLengthCm(Math.hypot(previewPoint.x - currentStart.x, previewPoint.y - currentStart.y));
+    setWallLengthInputValue('');
+    setIsWallLengthInputActive(true);
+    setIsMobileWallLengthInputOpen(true);
+    setAlignmentGuides([]);
+    setActiveSnapNode(null);
+  }, [activeTool, currentStart, getCurrentWallPreviewPoint]);
 
   const commitWallSegment = useCallback((endPoint: Point) => {
     if (!currentStart) return;
@@ -2278,6 +2454,22 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     setSelectedOpeningIndex(null);
     resetWallLengthInput();
   }, [currentStart, currentThickness, getContinuationDirectionsForPoint, pushHistorySnapshot, resetWallLengthInput]);
+
+  const confirmMobileWallLengthInput = useCallback(() => {
+    if (!currentStart || !lockedWallDirection) {
+      return;
+    }
+
+    const typedMeters = parseWallLengthMeters(wallLengthInputValue);
+    if (typedMeters === null) {
+      return;
+    }
+
+    commitWallSegment({
+      x: currentStart.x + lockedWallDirection.x * typedMeters * 100,
+      y: currentStart.y + lockedWallDirection.y * typedMeters * 100,
+    });
+  }, [commitWallSegment, currentStart, lockedWallDirection, parseWallLengthMeters, wallLengthInputValue]);
 
   const getPreviewWallLengthCm = useCallback(() => {
     const previewPoint = getCurrentWallPreviewPoint();
@@ -2327,6 +2519,14 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     wallLengthInputValue,
     walls,
   ]);
+
+  const shouldShowMobileWallLengthPill = activeTool === 'draw' && currentStart !== null && !isReferenceCalibration;
+  const mobileWallLengthDisplayValue = isMobileWallLengthInputOpen
+    ? wallLengthInputValue
+    : (() => {
+        const previewLength = getPreviewWallLengthCm();
+        return previewLength !== null ? formatMetersValue(previewLength) : '--';
+      })();
 
   const rotateSelectedWalls = useCallback((direction: 'ccw' | 'cw') => {
     if (!selectedWallsRotationPivot || selectedWallIndices.length < 2) {
@@ -2840,19 +3040,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       }
       
       if (isRoomMeasureMode) {
-        const measurement = measureRoomAtPoint(rawPos);
-        setSelectedWallIndex(null);
-        setSelectedOpeningIndex(null);
-        setSelectedWallIndices([]);
-
-        if (!measurement) {
-          setRoomMeasurement(null);
-          setRoomMeasureMessage('Cannot calculate area: room is not fully closed.');
-          return;
-        }
-
-        setRoomMeasurement(measurement);
-        setRoomMeasureMessage('Room measured. Click inside another closed room.');
+        applyRoomMeasurementAtPoint(rawPos);
         return;
       }
 
@@ -3263,6 +3451,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       allowAlignment: Boolean(currentStart && activeTool === 'draw'),
       continuationDirections,
     });
+    desktopWallDraftDirectionRef.current =
+      activeTool === 'draw' && currentStart
+        ? normalizeDirection(currentStart, snapResult.point)
+        : null;
     setMousePos(snapResult.point);
     setActiveSnapNode(snapResult.snappedNode);
     setAlignmentGuides(
@@ -3437,6 +3629,34 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     setRawMousePos(rawPos);
     setMousePos(rawPos);
 
+    if (isPrintModeActive && printFrame) {
+      const isInsideFrame = isPointInsideRect(rawPos, {
+        minX: printFrame.x,
+        minY: printFrame.y,
+        maxX: printFrame.x + printFrame.width,
+        maxY: printFrame.y + printFrame.height,
+      });
+
+      if (isInsideFrame) {
+        e.currentTarget.setPointerCapture(e.pointerId);
+        touchPressRef.current = {
+          pointerId: e.pointerId,
+          startClientX: e.clientX,
+          startClientY: e.clientY,
+          startWorld: rawPos,
+          target: { type: 'empty' },
+          dragActivated: true,
+        };
+        setDraggingPrintFrame({
+          offsetX: rawPos.x - printFrame.x,
+          offsetY: rawPos.y - printFrame.y,
+        });
+        setAlignmentGuides([]);
+        setActiveSnapNode(null);
+        return;
+      }
+    }
+
     let target: TouchPressState['target'] = { type: 'empty' };
 
     if (activeTool === 'select') {
@@ -3581,6 +3801,24 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       }
 
       if (touchPressRef.current?.dragActivated) {
+        if (draggingPrintFrame) {
+          setPrintFrame((currentFrame) => {
+            if (!currentFrame) {
+              return currentFrame;
+            }
+
+            return {
+              ...currentFrame,
+              x: rawPos.x - draggingPrintFrame.offsetX,
+              y: rawPos.y - draggingPrintFrame.offsetY,
+            };
+          });
+          setMousePos(rawPos);
+          setAlignmentGuides([]);
+          setActiveSnapNode(null);
+          return;
+        }
+
         if (draggingWallGroup) {
           const snapResult = getSnapResult(rawPos, false, {
             allowAlignment: true,
@@ -3651,22 +3889,32 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
         setSelectedWallIndex(closest.wallIndex);
       }
       setMousePos(rawPos);
+      setActiveDirectionalSnapLabel(null);
       return;
     }
 
     if (activeTool === 'draw' && currentStart) {
+      if (isWallLengthInputActive) {
+        setAlignmentGuides([]);
+        setActiveSnapNode(null);
+        return;
+      }
+
       const snapResult = getSnapResult(rawPos, false, {
         anchor: currentStart,
         allowAlignment: true,
         continuationDirections,
+        enableDirectionalSnap: true,
       });
       setMousePos(snapResult.point);
       setActiveSnapNode(snapResult.snappedNode);
       setAlignmentGuides(snapResult.guides);
+      setActiveDirectionalSnapLabel(snapResult.directionalSnapLabel ?? null);
       return;
     }
 
     setMousePos(rawPos);
+    setActiveDirectionalSnapLabel(null);
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
@@ -3679,6 +3927,9 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     }
 
     e.preventDefault();
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
     const rawPos = getRelativePosFromClient(e.clientX, e.clientY);
     const press = touchPressRef.current;
     const gesture = touchGestureRef.current;
@@ -3717,17 +3968,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     }
 
     if (isRoomMeasureMode) {
-      const measurement = measureRoomAtPoint(rawPos);
-      setSelectedWallIndex(null);
-      setSelectedOpeningIndex(null);
-      setSelectedWallIndices([]);
-      if (!measurement) {
-        setRoomMeasurement(null);
-        setRoomMeasureMessage('Cannot calculate area: room is not fully closed.');
-        return;
-      }
-      setRoomMeasurement(measurement);
-      setRoomMeasureMessage('Room measured. Tap inside another closed room.');
+      applyRoomMeasurementAtPoint(rawPos);
       return;
     }
 
@@ -3783,11 +4024,17 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     }
 
     if (currentStart && activeTool === 'draw') {
+      if (isWallLengthInputActive) {
+        return;
+      }
+
       const snapResult = getSnapResult(rawPos, false, {
         anchor: currentStart,
         allowAlignment: true,
         continuationDirections,
+        enableDirectionalSnap: true,
       });
+      setActiveDirectionalSnapLabel(snapResult.directionalSnapLabel ?? null);
       commitWallSegment(snapResult.point);
       return;
     }
@@ -3799,6 +4046,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       resetWallLengthInput();
       setAlignmentGuides([]);
       setActiveSnapNode(snapResult.snappedNode);
+      setActiveDirectionalSnapLabel(null);
       setSelectedWallIndex(null);
       setSelectedOpeningIndex(null);
       return;
@@ -3872,6 +4120,9 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       return;
     }
 
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
     resetTouchInteractionState();
     handleMouseUp();
   };
@@ -4142,34 +4393,58 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     }
   }, [resetWallLengthInput]);
 
+  const activateRoomMeasureMode = useCallback(() => {
+    setPrintFrame(null);
+    setDraggingPrintFrame(null);
+    setPrintStatusMessage(null);
+    setIsRoomMeasureMode(true);
+    setRoomMeasureMessage(isMobileViewport ? 'Tap inside a closed room.' : 'Room measure mode: click inside a closed room.');
+    setCurrentStart(null);
+    setContinuationDirections(null);
+    setAlignmentGuides([]);
+    setActiveSnapNode(null);
+    setDraggingPoint(null);
+    setDraggingWallGroup(null);
+    setDraggingOpening(null);
+    setMarqueeSelection(null);
+    setMarqueeMode(null);
+    setPendingMultiWallToggle(null);
+    setSelectedWallIndex(null);
+    setSelectedOpeningIndex(null);
+    setSelectedWallIndices([]);
+    resetWallLengthInput();
+  }, [isMobileViewport, resetWallLengthInput]);
+
   const toggleRoomMeasureMode = useCallback(() => {
-    setIsRoomMeasureMode((current) => {
-      const next = !current;
-      if (next) {
-        setPrintFrame(null);
-        setDraggingPrintFrame(null);
-        setPrintStatusMessage(null);
-        setRoomMeasureMessage('Room measure mode: click inside a closed room.');
-        setCurrentStart(null);
-        setContinuationDirections(null);
-        setAlignmentGuides([]);
-        setActiveSnapNode(null);
-        setDraggingPoint(null);
-        setDraggingWallGroup(null);
-        setDraggingOpening(null);
-        setMarqueeSelection(null);
-        setMarqueeMode(null);
-        setPendingMultiWallToggle(null);
-        setSelectedWallIndex(null);
-        setSelectedOpeningIndex(null);
-        setSelectedWallIndices([]);
-        resetWallLengthInput();
-      } else {
-        setRoomMeasureMessage(null);
+    if (isRoomMeasureMode) {
+      setIsRoomMeasureMode(false);
+      setRoomMeasureMessage(null);
+      return;
+    }
+
+    activateRoomMeasureMode();
+  }, [activateRoomMeasureMode, isRoomMeasureMode]);
+
+  const applyRoomMeasurementAtPoint = useCallback((point: Point) => {
+    const measurement = measureRoomAtPoint(point);
+    setSelectedWallIndex(null);
+    setSelectedOpeningIndex(null);
+    setSelectedWallIndices([]);
+
+    if (!measurement) {
+      if (isMobileViewport) {
+        setRoomMeasureMessage('No room detected. Tap inside a closed room.');
+        return;
       }
-      return next;
-    });
-  }, [resetWallLengthInput]);
+
+      setRoomMeasurement(null);
+      setRoomMeasureMessage('Cannot calculate area: room is not fully closed.');
+      return;
+    }
+
+    setRoomMeasurement(measurement);
+    setRoomMeasureMessage(isMobileViewport ? 'Room measured. Tap another room.' : 'Room measured. Click inside another closed room.');
+  }, [isMobileViewport, measureRoomAtPoint]);
 
   useEffect(() => {
     scheduleFitToView();
@@ -4207,6 +4482,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   useEffect(() => {
     if (activeTool !== 'draw' || !currentStart) {
       setAlignmentGuides([]);
+      desktopWallDraftDirectionRef.current = null;
       if (activeTool !== 'draw' || !currentStart) {
         setContinuationDirections(null);
       }
@@ -4218,6 +4494,19 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       resetWallLengthInput();
     }
   }, [activeTool, currentStart, mode, resetWallLengthInput]);
+
+  useEffect(() => {
+    if (!isMobileWallLengthInputOpen) {
+      return;
+    }
+
+    const focusTimeout = window.setTimeout(() => {
+      mobileWallLengthInputRef.current?.focus();
+      mobileWallLengthInputRef.current?.select();
+    }, 0);
+
+    return () => window.clearTimeout(focusTimeout);
+  }, [isMobileWallLengthInputOpen]);
 
   const handleFinish = () => {
     if (walls.length === 0) return;
@@ -4243,7 +4532,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
             allowAlignment: true,
             continuationDirections,
           }).point;
-          const nextDirection = normalizeDirection(currentStart, previewPoint) ?? { x: 1, y: 0 };
+          const nextDirection =
+            desktopWallDraftDirectionRef.current ??
+            normalizeDirection(currentStart, previewPoint) ??
+            { x: 1, y: 0 };
           setLockedWallDirection(nextDirection);
           setWallLengthInputValue(sanitizeWallLengthInput(wallLengthInputChar));
           setIsWallLengthInputActive(true);
@@ -4371,26 +4663,134 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     if (isPrintModeActive) return printStatusMessage ?? "Print mode: position the A4 frame, then export the PDF.";
     if (isRoomMeasureMode) return roomMeasureMessage ?? "Room measure mode: click inside a closed room.";
     if (isMultiWallRotationMode) return "Rotation mode: CTRL + left click = rotate 15 degrees clockwise";
-    if (isMultiWallRotationMode) return "Rotation mode: left click = 15° CCW, right click = 15° CW";
-    if (isAdjustingBackground && hasBackground) return "Drag to move the reference • use rotate controls to straighten it";
+    if (isMultiWallRotationMode) return "Rotation mode: left click = 15 deg CCW | right click = 15 deg CW";
+    if (isAdjustingBackground && hasBackground) return "Drag to move the reference | use rotate controls to straighten it";
     if (panMode || isDragging) return "Drag to move the view";
     const isDrawToolActive = activeTool === 'draw';
     if (isDrawToolActive) {
       return workflowStep === 'scale'
-        ? (currentStart ? "Click for the second point of the reference segment â€¢ SHIFT = soft constraints" : "Click for the first point of the reference segment")
-        : (currentStart ? "Click for the second point â€¢ SHIFT = soft constraints" : "Click for the first wall point");
+        ? (currentStart ? "Click for the second point of the reference segment | SHIFT = soft constraints" : "Click for the first point of the reference segment")
+        : (currentStart ? "Click for the second point | SHIFT = soft constraints" : "Click for the first wall point");
     }
     switch (activeTool as any) {
-      case 'draw': return currentStart ? "Click for the second point • SHIFT = soft constraints" : "Click for the first wall point";
+      case 'draw': return currentStart ? "Click for the second point | SHIFT = soft constraints" : "Click for the first wall point";
       case 'door': return "Click a wall to insert a door";
       case 'window': return "Click a wall to insert a window";
       case 'window-floor': return "Click a wall to insert a floor window";
-      case 'select': return "Drag nodes to edit • click to select";
-      case 'multi-wall': return "Click walls to build a group • SHIFT + drag = marquee • drag to move";
+      case 'select': return "Drag nodes to edit | click to select";
+      case 'multi-wall': return "Click walls to build a group | SHIFT + drag = marquee | drag to move";
       case 'delete': return "Click elements to remove them";
       default: return "";
     }
   };
+
+  const getMobileInstruction = useCallback((): { primary: string; secondary?: string } => {
+    if (isReferenceCalibration) {
+      if (referenceCalibrationSegment) {
+        return { primary: "Enter the reference length." };
+      }
+      if (referenceCalibrationStart) {
+        return { primary: "Tap the second reference point." };
+      }
+      return { primary: "Tap the first reference point." };
+    }
+
+    if (isCalibrating) {
+      return calibrationWallIndex === null
+        ? { primary: "Tap a wall to recalibrate." }
+        : { primary: "Enter the real wall span." };
+    }
+
+    if (isPrintModeActive) {
+      if (draggingPrintFrame) {
+        return { primary: "Drag the frame." };
+      }
+
+      return { primary: "Place the frame, then export." };
+    }
+
+    if (isRoomMeasureMode) {
+      if (roomMeasurement) {
+        return { primary: "Tap another room to update." };
+      }
+
+      if (roomMeasureMessage?.includes('No room detected')) {
+        return { primary: "No room detected.", secondary: "Tap inside a closed room." };
+      }
+
+      return { primary: "Tap inside a closed room." };
+    }
+
+    if (isMultiWallRotationMode) {
+      return { primary: "Use the rotate controls below." };
+    }
+
+    if (isAdjustingBackground && hasBackground) {
+      return { primary: "Drag to move the reference." };
+    }
+
+    if (panMode || isDragging) {
+      return { primary: "Drag to move the view." };
+    }
+
+    if (isMobileWallLengthInputOpen) {
+      return { primary: "Enter wall length." };
+    }
+
+    if (shouldShowMobileWallLengthPill) {
+      return { primary: currentStart ? "Tap again to finish the wall." : "Tap to start drawing." };
+    }
+
+    const isDrawToolActive = activeTool === 'draw';
+    if (isDrawToolActive) {
+      if (workflowStep === 'scale') {
+        return {
+          primary: currentStart ? "Tap the second reference point." : "Tap the first reference point.",
+        };
+      }
+
+      return {
+        primary: currentStart ? "Tap to place the next point." : "Tap the first wall point.",
+      };
+    }
+
+    switch (activeTool as any) {
+      case 'door':
+        return { primary: "Tap a wall to add a door." };
+      case 'window':
+        return { primary: "Tap a wall to add a window." };
+      case 'window-floor':
+        return { primary: "Tap a wall to add a full-height window." };
+      case 'select':
+        return { primary: "Tap to select. Drag handles to edit." };
+      case 'multi-wall':
+        return { primary: "Tap walls to build a group." };
+      case 'delete':
+        return { primary: "Tap elements to delete." };
+      default:
+        return { primary: "" };
+    }
+  }, [
+    activeTool,
+    calibrationWallIndex,
+    currentStart,
+    draggingPrintFrame,
+    hasBackground,
+    isCalibrating,
+    isDragging,
+    isMobileWallLengthInputOpen,
+    isMultiWallRotationMode,
+    isPrintModeActive,
+    isReferenceCalibration,
+    isRoomMeasureMode,
+    panMode,
+    roomMeasureMessage,
+    roomMeasurement,
+    shouldShowMobileWallLengthPill,
+    workflowStep,
+  ]);
+
+  const mobileInstruction = getMobileInstruction();
 
   const currentGuideContent = GUIDE_PANEL_CONTENT[workflowStep === 'trace' ? 'trace' : 'scale'];
 
@@ -4563,7 +4963,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
             <div className="space-y-4 text-[11px] leading-relaxed">
               <div className="space-y-1">
                 <p className="font-bold uppercase tracking-tighter">Wall</p>
-                <p className="opacity-60">Click two points to draw. Hold <span className="font-mono bg-[#141414]/5 px-1 rounded">SHIFT</span> for 45° constraints. Snapping stays soft on endpoints and X/Y alignments. Drag nodes to edit.</p>
+                <p className="opacity-60">Click two points to draw. Hold <span className="font-mono bg-[#141414]/5 px-1 rounded">SHIFT</span> for 45 deg constraints. Snapping stays soft on endpoints and X/Y alignments. Drag nodes to edit.</p>
                 <p className="opacity-60 italic"><span className="font-bold">THICK</span> = wall thickness.</p>
               </div>
 
@@ -4703,7 +5103,6 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                 <div className="sticky top-0 z-10 -mx-4 -mt-4 flex shrink-0 items-center justify-between rounded-t-[28px] border-b border-[#141414]/8 bg-white/96 px-4 py-4 backdrop-blur-md">
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#141414]/38">Tool Picker</p>
-                    <p className="mt-1 text-xs text-[#141414]/55">Mostra un solo gruppo di controlli alla volta.</p>
                   </div>
                   <button type="button" onClick={() => setIsMobileToolsOpen(false)} className="rounded-full p-2 text-[#141414]/45 hover:bg-[#141414]/5 hover:text-[#141414]">
                     <X className="h-4 w-4" />
@@ -4815,7 +5214,6 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                 <div className="sticky top-0 z-10 -mx-4 -mt-4 flex shrink-0 items-center justify-between rounded-t-[28px] border-b border-[#141414]/8 bg-white/96 px-4 py-4 backdrop-blur-md">
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#141414]/38">Properties</p>
-                    <p className="mt-1 text-xs text-[#141414]/55">Controlli contestuali richiamati on demand.</p>
                   </div>
                   <button type="button" onClick={() => setIsMobilePropertiesOpen(false)} className="rounded-full p-2 text-[#141414]/45 hover:bg-[#141414]/5 hover:text-[#141414]">
                     <X className="h-4 w-4" />
@@ -4910,11 +5308,12 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      setMobileOverlayPanel('measure');
+                      activateRoomMeasureMode();
+                      setMobileOverlayPanel(null);
                       setIsMobilePropertiesOpen(false);
                     }}
                     className={`min-h-11 rounded-2xl px-3 py-3 text-[10px] font-bold uppercase tracking-[0.16em] ${
-                      mobileOverlayPanel === 'measure' || isRoomMeasureMode ? 'bg-[#CBBBA0] text-[#141414]' : 'bg-[#141414]/5 text-[#141414]'
+                      isRoomMeasureMode ? 'bg-[#CBBBA0] text-[#141414]' : 'bg-[#141414]/5 text-[#141414]'
                     }`}
                   >
                     Measure
@@ -5022,7 +5421,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                     </span>
                   </div>
                   <div className="border-t border-[#141414]/10 px-4 py-4 text-center">
-                    <span className="block text-[9px] font-bold uppercase tracking-[0.16em] text-[#141414]/38">Area (m²)</span>
+                    <span className="block text-[9px] font-bold uppercase tracking-[0.16em] text-[#141414]/38">Area (m2)</span>
                     <span className="mt-2 block text-lg font-mono font-bold text-[#141414]">
                       {roomMeasurement ? formatSquareMetersValue(roomMeasurement.areaCm2) : '--'}
                     </span>
@@ -5064,7 +5463,6 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                 <div className="sticky top-0 z-10 -mx-4 -mt-4 flex items-center justify-between rounded-t-[28px] border-b border-[#141414]/8 bg-white/96 px-4 py-4 backdrop-blur-md">
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#141414]/38">Print</p>
-                    <p className="mt-1 text-xs text-[#141414]/55">Setup A4 export and keep every control reachable on mobile.</p>
                   </div>
                   <button
                     type="button"
@@ -5659,7 +6057,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
               </div>
               <div className="border-t border-[#141414]/10 px-3 py-3 text-center">
                 <span className="block text-[8px] font-bold uppercase tracking-tighter opacity-40">
-                  AREA (M²)
+                  AREA (M2)
                 </span>
                 <span className="mt-1 block text-[12px] font-mono font-bold text-[#141414]">
                   {roomMeasurement ? formatSquareMetersValue(roomMeasurement.areaCm2) : '--'}
@@ -5734,8 +6132,141 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
             </div>
           </div>
         )}
+        {shouldShowMobileWallLengthPill && (
+          <div
+            data-ui-overlay="true"
+            className="absolute bottom-16 left-3 right-3 z-30 flex justify-center md:hidden"
+            onMouseDown={stopUiMouseDown}
+            onMouseUp={stopUiMouseUp}
+            onClick={stopUiClick}
+            onPointerDown={stopUiPointerDown}
+            onPointerUp={stopUiPointerUp}
+            onTouchStart={stopUiTouchStart}
+            onTouchEnd={stopUiTouchEnd}
+          >
+            <div className={`w-full max-w-[20rem] rounded-[24px] border border-[#141414]/10 shadow-xl backdrop-blur-md transition-all ${isMobileWallLengthInputOpen ? 'bg-white/96 p-3' : 'bg-white/92 p-2.5'}`}>
+              {!isMobileWallLengthInputOpen ? (
+                <button
+                  type="button"
+                  onClick={beginMobileWallLengthInput}
+                  className="flex min-h-12 w-full items-center justify-between gap-3 rounded-[18px] bg-[#141414]/5 px-4 py-3 text-left text-[#141414]"
+                >
+                  <div>
+                    <span className="block text-[9px] font-bold uppercase tracking-[0.16em] text-[#141414]/38">Length (m)</span>
+                    <span className="mt-1 block text-base font-mono font-bold">{mobileWallLengthDisplayValue}</span>
+                  </div>
+                  <div className="text-right">
+                    {activeDirectionalSnapLabel && (
+                      <span className="block text-[9px] font-bold uppercase tracking-[0.14em] text-[#8C7355]">{activeDirectionalSnapLabel}</span>
+                    )}
+                    <span className="mt-1 block text-[10px] font-bold uppercase tracking-[0.16em] text-[#141414]/55">Tap to set</span>
+                  </div>
+                </button>
+              ) : (
+                <form
+                  className="space-y-3"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    confirmMobileWallLengthInput();
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-3 rounded-[18px] bg-[#141414]/5 px-4 py-3">
+                    <div>
+                      <span className="block text-[9px] font-bold uppercase tracking-[0.16em] text-[#141414]/38">Length (m)</span>
+                      <input
+                        ref={mobileWallLengthInputRef}
+                        type="text"
+                        inputMode="decimal"
+                        value={wallLengthInputValue}
+                        onChange={(event) => setWallLengthInputValue(sanitizeWallLengthInput(event.target.value))}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Escape') {
+                            event.preventDefault();
+                            resetWallLengthInput();
+                          }
+                        }}
+                        placeholder={mobileLockedPreviewLengthCm !== null ? formatMetersValue(mobileLockedPreviewLengthCm) : '0.00'}
+                        className="mt-1 w-full bg-transparent text-left text-lg font-mono font-bold text-[#141414] outline-none"
+                      />
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <span className="block text-[9px] font-bold uppercase tracking-[0.14em] text-[#8C7355]">
+                        {activeDirectionalSnapLabel ?? 'Locked'}
+                      </span>
+                      <span className="mt-1 block text-[10px] text-[#141414]/55">Direction locked</span>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={resetWallLengthInput}
+                      className="min-h-11 rounded-2xl bg-[#141414]/5 px-4 py-3 text-[10px] font-bold uppercase tracking-[0.16em] text-[#141414]"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={parseWallLengthMeters(wallLengthInputValue) === null}
+                      className="min-h-11 rounded-2xl bg-[#141414] px-4 py-3 text-[10px] font-bold uppercase tracking-[0.16em] text-white disabled:opacity-40"
+                    >
+                      Confirm
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
+        )}
+        {isRoomMeasureMode && roomMeasurement && (
+          <div
+            data-ui-overlay="true"
+            className="absolute bottom-16 left-3 right-3 z-30 flex justify-center md:hidden"
+            onMouseDown={stopUiMouseDown}
+            onMouseUp={stopUiMouseUp}
+            onClick={stopUiClick}
+            onPointerDown={stopUiPointerDown}
+            onPointerUp={stopUiPointerUp}
+            onTouchStart={stopUiTouchStart}
+            onTouchEnd={stopUiTouchEnd}
+          >
+            <div className="w-full max-w-[20rem] overflow-hidden rounded-[24px] border border-[#141414]/10 bg-white/94 shadow-xl backdrop-blur-md">
+              <div className="border-b border-[#141414]/8 px-4 py-2.5 text-center">
+                <span className="block text-[9px] font-bold uppercase tracking-[0.16em] text-[#6C5A46]">Room Measure</span>
+              </div>
+              <div className="grid grid-cols-2 divide-x divide-[#141414]/10">
+                <div className="px-4 py-3 text-center">
+                  <span className="block text-[8px] font-bold uppercase tracking-[0.16em] text-[#141414]/38">Perimeter (m)</span>
+                  <span className="mt-1.5 block text-base font-mono font-bold text-[#141414]">
+                    {formatMetersValue(roomMeasurement.perimeterCm)}
+                  </span>
+                </div>
+                <div className="px-4 py-3 text-center">
+                  <span className="block text-[8px] font-bold uppercase tracking-[0.16em] text-[#141414]/38">Area (m2)</span>
+                  <span className="mt-1.5 block text-base font-mono font-bold text-[#141414]">
+                    {formatSquareMetersValue(roomMeasurement.areaCm2)}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
         {/* Status Bar */}
-        <div className="absolute bottom-3 left-3 right-3 z-20 flex items-center justify-center gap-3 rounded-full border border-white/10 bg-[#141414]/80 px-3 py-1.5 text-white shadow-xl backdrop-blur-md md:bottom-6 md:left-1/2 md:right-auto md:-translate-x-1/2 md:px-6 md:py-2">
+        <div className="absolute bottom-3 left-3 right-3 z-20 md:hidden">
+          <div className="mx-auto flex max-w-[22rem] items-center justify-center rounded-[20px] border border-white/10 bg-[#141414]/82 px-4 py-2 text-white shadow-xl backdrop-blur-md">
+            <div className="min-w-0 text-center">
+              <p className="text-[9px] font-mono uppercase tracking-[0.14em] opacity-85">
+                {mobileInstruction.primary}
+              </p>
+              {mobileInstruction.secondary && (
+                <p className="mt-1 text-[9px] font-mono uppercase tracking-[0.12em] opacity-55">
+                  {mobileInstruction.secondary}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="absolute bottom-3 left-3 right-3 z-20 hidden items-center justify-center gap-3 rounded-full border border-white/10 bg-[#141414]/80 px-3 py-1.5 text-white shadow-xl backdrop-blur-md md:bottom-6 md:left-1/2 md:right-auto md:flex md:-translate-x-1/2 md:px-6 md:py-2">
           <p className="max-w-full truncate text-[9px] font-mono uppercase tracking-[0.16em] opacity-80 md:text-[10px] md:tracking-[0.2em]">
             {getToolInstruction()}
           </p>
@@ -5869,7 +6400,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                         letterSpacing="0.14em"
                         fill="#6C5A46"
                       >
-                        {`A4 · 1:${printFrame.scale} · ${printFrame.orientation === 'portrait' ? 'Portrait' : 'Landscape'}`}
+                        {`A4 | 1:${printFrame.scale} | ${printFrame.orientation === 'portrait' ? 'Portrait' : 'Landscape'}`}
                       </text>
                     </g>
                   </g>
@@ -6077,7 +6608,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                     y1={currentStart.y}
                     x2={getCurrentWallPreviewPoint()!.x}
                     y2={getCurrentWallPreviewPoint()!.y}
-                    stroke="#141414"
+                    stroke={activeDirectionalSnapLabel ? "#8C7355" : "#141414"}
                     strokeWidth="1"
                     strokeDasharray="4,4"
                     className="opacity-60"

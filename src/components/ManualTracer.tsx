@@ -2486,6 +2486,28 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     return snapResult.point;
   }, [getSnapResult, rawMousePos, referenceCalibrationStart]);
 
+  const cancelScaleSegmentDraft = useCallback(() => {
+    if (isReferenceCalibration && referenceCalibrationStart) {
+      setReferenceCalibrationStart(null);
+      setReferenceCalibrationSegment(null);
+      setAlignmentGuides([]);
+      setActiveSnapNode(null);
+      return true;
+    }
+
+    if (mode === 'scale' && activeTool === 'draw' && currentStart) {
+      setCurrentStart(null);
+      setContinuationDirections(null);
+      setAlignmentGuides([]);
+      setActiveSnapNode(null);
+      setActiveDirectionalSnapLabel(null);
+      resetWallLengthInput();
+      return true;
+    }
+
+    return false;
+  }, [activeTool, currentStart, isReferenceCalibration, mode, referenceCalibrationStart, resetWallLengthInput]);
+
   const getDisplayedWallLength = useCallback(() => {
     if (isWallLengthInputActive) {
       return wallLengthInputValue;
@@ -4588,6 +4610,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       
       if (e.code === 'Escape') {
         if (isWallLengthInputActive) return;
+        if (cancelScaleSegmentDraft()) {
+          e.preventDefault();
+          return;
+        }
         setIsAdjustingBackground(false);
         setBackgroundDragOrigin(null);
         setAlignmentGuides([]);
@@ -4651,7 +4677,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [activateTool, activeTool, commitWallSegment, continuationDirections, createWallCascadeDeletion, currentOpeningWidth, currentStart, currentThickness, getControlContext, getControlValue, getCurrentWallPreviewPoint, getSnapResult, getWallLengthInputChar, handleRedo, isWallLengthInputActive, lockedWallDirection, openings, parseWallLengthMeters, pushHistorySnapshot, rawMousePos, resetWallLengthInput, sanitizeWallLengthInput, selectedOpeningIndex, selectedWallIndex, wallLengthInputValue, workflowStep]);
+  }, [activateTool, activeTool, cancelScaleSegmentDraft, commitWallSegment, continuationDirections, createWallCascadeDeletion, currentOpeningWidth, currentStart, currentThickness, getControlContext, getControlValue, getCurrentWallPreviewPoint, getSnapResult, getWallLengthInputChar, handleRedo, isWallLengthInputActive, lockedWallDirection, openings, parseWallLengthMeters, pushHistorySnapshot, rawMousePos, resetWallLengthInput, sanitizeWallLengthInput, selectedOpeningIndex, selectedWallIndex, wallLengthInputValue, workflowStep]);
 
   const getToolInstruction = () => {
     if (isReferenceCalibration) {

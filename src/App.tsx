@@ -38,6 +38,82 @@ const ScreenLoader = ({ label }: { label: string }) => (
 const HERO_PLAN_IMAGE = '/hero-floorplan-2d.png';
 const HERO_SPACE_IMAGE = '/hero-space-3d.png';
 
+const SEO_SECTIONS = [
+  {
+    id: 'what-is-planities',
+    title: 'What is Planities',
+    body: [
+      'Planities is a fast browser-based tool for drawing floor plans in 2D and exploring spaces in 3D. It allows users to quickly visualize and walk inside an environment in an intuitive way, both in first-person and third-person view.',
+      'The core idea behind Planities is speed: speed of learning, speed of execution, and speed in transforming a technical drawing into a clear spatial understanding. No sign-up is required, and projects can be exported locally and reopened anytime.',
+      'Planities works on both desktop and mobile devices, making it possible to design or explore spaces wherever you are.',
+    ],
+  },
+  {
+    id: 'how-the-workflow-works',
+    title: 'How the workflow works',
+    body: [
+      'Planities is designed as a guided workflow that starts from a PDF or image floor plan and leads, within minutes, to a fully navigable 3D space.',
+      'Users can upload their floor plan, set the real scale by defining at least one known measurement, and trace the perimeter walls. Wall thickness can be adjusted, doors and windows can be placed, and with a single click the system generates a three-dimensional environment ready to explore.',
+      'The 3D model can be navigated in multiple ways: through an orbital view, as a first-person experience, or by following a human figure in third person. This approach makes spatial proportions and circulation paths much easier to understand compared to traditional two-dimensional drawings.',
+    ],
+  },
+  {
+    id: 'who-planities-is-for',
+    title: 'Who Planities is for',
+    body: [
+      'Planities is designed to be understandable and usable even by people without a technical or architectural background. It works as a simplified and guided alternative to traditional CAD software.',
+      'It can be useful for home buyers and sellers who want a more realistic perception of spaces, or for real estate listings that require a clean and elegant 3D visualization without distracting furniture. It is equally valuable for homeowners planning renovations who need to quickly test different layout solutions.',
+      'Architects and professionals can use Planities to present spatial ideas live to clients without relying on heavier and slower software. Architecture students and curious users can also benefit from an accessible tool for drawing floor plans and understanding their transformation into 3D environments.',
+    ],
+  },
+  {
+    id: 'walkable-3d-floor-plans',
+    title: 'Why walkable 3D floor plans improve spatial understanding',
+    body: [
+      'The ability to generate a 3D environment from a 2D floor plan in just a few steps helps overcome one of the main limitations of technical drawings: their difficulty of interpretation for non-experts.',
+      'Many people struggle to imagine the real size of a room by simply reading measurements on paper. Spatial proportions and room relationships are often hard to visualize, especially when the plan is shown without furniture or contextual references.',
+      'Exploring a space in first or third person allows users to virtually experience the layout, understand movement paths, evaluate internal distributions, and make more informed design or purchasing decisions. While 2D drawings remain essential, an easily accessible 3D navigation adds a level of intuitive comprehension that traditional representations cannot offer.',
+    ],
+  },
+  {
+    id: 'key-features',
+    title: 'Key features',
+    body: [
+      'Planities is designed to provide a minimal and efficient experience.',
+      'No login is required, and the tool works on both desktop and mobile devices. Users can import a floor plan, calibrate its scale to real dimensions, and trace walls quickly with adjustable thickness.',
+      'Doors and windows can be placed and adjusted instantly, new internal layouts can be tested, and a navigable 3D model can be generated in seconds. The 3D environment can be explored in orbital mode, first-person view, or third-person navigation.',
+      'The interface is clean and calming, created to reduce the learning curve and encourage a relaxed and intuitive spatial understanding.',
+    ],
+  },
+  {
+    id: 'use-cases',
+    title: 'Use cases',
+    body: [
+      'Planities can be applied in many real-world situations where spatial comprehension and communication are important.',
+      'People searching for a new home can virtually explore an apartment starting from its floor plan, gaining a clearer perception of proportions and circulation. Real estate agents can enhance property listings with simple and neutral 3D visualizations that make spaces easier to understand.',
+      'Homeowners planning renovations can quickly test different layout configurations and compare solutions by walking through the virtual environment. Students and professionals can use the tool as a fast base to explain spatial concepts or present preliminary design ideas.',
+    ],
+  },
+  {
+    id: 'browser-based-architectural-tool',
+    title: 'A browser-based architectural tool',
+    body: [
+      'Planities is built to run entirely online, without installation or complex setup.',
+      'This makes the tool immediately accessible from any device and allows users to start working within seconds. Its lightweight architecture ensures smooth performance even on smartphones, expanding the possibilities of mobile design and visualization.',
+      'Architecture becomes more approachable, more understandable, and easier to share.',
+    ],
+  },
+  {
+    id: 'continuous-development',
+    title: 'Continuous development',
+    body: [
+      'Planities is a young project that is actively evolving. New features, performance improvements, and usability refinements are continuously being developed to make spatial understanding faster, simpler, and more accessible.',
+      'The current version already provides a complete workflow from 2D floor plans to walkable 3D environments, while future updates will continue to expand its capabilities.',
+      'Feedback from users plays an important role in shaping the direction of the tool.',
+    ],
+  },
+] as const;
+
 function HeroScreenshotCard({
   src,
   alt,
@@ -419,8 +495,8 @@ export default function App() {
               exit={{ opacity: 0, y: -20 }}
               className="flex-1 flex flex-col px-4 pb-8 pt-28 sm:px-6 sm:pb-10 sm:pt-32"
             >
-              <div className="mx-auto flex w-full max-w-[1640px] flex-1 items-center">
-                <div className="w-full rounded-[36px] border border-[#141414]/7 bg-[#F5F2EC]/86 px-5 py-6 shadow-[0_30px_90px_rgba(20,20,20,0.08)] backdrop-blur-xl sm:px-8 sm:py-8 lg:px-10 lg:py-10">
+              <div className="mx-auto flex w-full max-w-[1640px] flex-col gap-8 lg:gap-10">
+                <div className="rounded-[36px] border border-[#141414]/7 bg-[#F5F2EC]/86 px-5 py-6 shadow-[0_30px_90px_rgba(20,20,20,0.08)] backdrop-blur-xl sm:px-8 sm:py-8 lg:px-10 lg:py-10">
                   <div className="mb-6 flex flex-wrap items-center justify-center gap-3 text-center lg:mb-8 lg:justify-between lg:text-left">
                     <div className="inline-flex items-center gap-3 rounded-full border border-[#141414]/8 bg-white/85 px-4 py-2 shadow-sm">
                       <span className="text-[10px] uppercase tracking-[0.24em] text-[#141414]/38">2D plan</span>
@@ -527,6 +603,41 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+
+                <section
+                  aria-labelledby="planities-seo-content"
+                  className="rounded-[36px] border border-[#141414]/7 bg-white/72 px-5 py-8 shadow-[0_24px_80px_rgba(20,20,20,0.06)] backdrop-blur-xl sm:px-8 lg:px-10 lg:py-10"
+                >
+                  <div className="mx-auto max-w-[1100px]">
+                    <div className="max-w-3xl space-y-4">
+                      <p className="text-[10px] uppercase tracking-[0.28em] text-[#141414]/38">Planities overview</p>
+                      <h2 id="planities-seo-content" className="text-3xl font-medium tracking-[-0.04em] text-[#141414] sm:text-4xl">
+                        From floor plan to walkable space, with context that keeps scrolling.
+                      </h2>
+                      <p className="text-base leading-7 text-[#141414]/58 sm:text-lg">
+                        Below the hero, Planities can explain its workflow, audience, and value clearly for both visitors and search engines without interrupting the main call to action.
+                      </p>
+                    </div>
+
+                    <div className="mt-10 grid gap-5 lg:grid-cols-2">
+                      {SEO_SECTIONS.map((section) => (
+                        <article
+                          key={section.id}
+                          className="rounded-[28px] border border-[#141414]/8 bg-[#F8F5EF] px-5 py-5 shadow-sm sm:px-6 sm:py-6"
+                        >
+                          <h3 id={section.id} className="text-xl font-medium tracking-[-0.03em] text-[#141414]">
+                            {section.title}
+                          </h3>
+                          <div className="mt-4 space-y-4 text-sm leading-7 text-[#141414]/68 sm:text-[15px]">
+                            {section.body.map((paragraph) => (
+                              <p key={paragraph}>{paragraph}</p>
+                            ))}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+                </section>
               </div>
             </motion.div>
           )}

@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, ContactShadows, Environment, PerspectiveCamera } from '@react-three/drei';
-import { Move } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Move, Triangle } from 'lucide-react';
 import * as THREE from 'three';
 import { FloorPlanData, WallSegment, Opening } from '../services/geminiService';
 
@@ -9,6 +9,19 @@ interface Scene3DProps {
   data: FloorPlanData;
   mode: 'orbit' | 'first-person' | 'third-person';
   onReady?: () => void;
+}
+
+interface ThirdPersonControlState {
+  moveForward: boolean;
+  moveBackward: boolean;
+  rotateLeft: boolean;
+  rotateRight: boolean;
+}
+
+interface FirstPersonControlState {
+  moveForward: boolean;
+  moveLeft: boolean;
+  moveRight: boolean;
 }
 
 const WALL_HEIGHT = 3;
@@ -28,6 +41,8 @@ const SCENE_PALETTE = {
 };
 
 const EYE_HEIGHT = 1.7;
+const FIRST_PERSON_VERTICAL_LIMIT = Math.PI / 2 - 0.14;
+const FIRST_PERSON_TOUCH_LOOK_SENSITIVITY = 0.0032;
 const THIRD_PERSON_HEIGHT = 1.7;
 const THIRD_PERSON_CAMERA_HEIGHT = 1.06;
 const THIRD_PERSON_TARGET_HEIGHT = 1.02;
@@ -47,6 +62,18 @@ const THIRD_PERSON_COLLISION_RADIUS = 0.12;
 const WALL_COLLISION_BUFFER = 0.03;
 const DOOR_COLLISION_CLEARANCE = 0.16;
 const DOOR_PASSAGE_DEPTH = 0.24;
+const THIRD_PERSON_TOUCH_DEAD_ZONE = 24;
+const THIRD_PERSON_IDLE_CONTROLS: ThirdPersonControlState = {
+  moveForward: false,
+  moveBackward: false,
+  rotateLeft: false,
+  rotateRight: false,
+};
+const FIRST_PERSON_IDLE_CONTROLS: FirstPersonControlState = {
+  moveForward: false,
+  moveLeft: false,
+  moveRight: false,
+};
 
 const planToWorldX = (x: number) => x * SCALE_FACTOR;
 const planToWorldZ = (y: number) => -y * SCALE_FACTOR;
@@ -66,6 +93,26 @@ const angleLerp = (current: number, target: number, smoothing: number, delta: nu
     current + THREE.MathUtils.euclideanModulo(target - current + Math.PI, Math.PI * 2) - Math.PI,
     1 - Math.exp(-smoothing * delta),
   );
+
+const resolveThirdPersonTouchControls = (
+  deltaX: number,
+  deltaY: number,
+  deadZone: number,
+): ThirdPersonControlState => {
+  if (Math.abs(deltaX) < deadZone && Math.abs(deltaY) < deadZone) {
+    return THIRD_PERSON_IDLE_CONTROLS;
+  }
+
+  if (Math.abs(deltaY) >= Math.abs(deltaX)) {
+    return deltaY < 0
+      ? { ...THIRD_PERSON_IDLE_CONTROLS, moveForward: true }
+      : { ...THIRD_PERSON_IDLE_CONTROLS, moveBackward: true };
+  }
+
+  return deltaX < 0
+    ? { ...THIRD_PERSON_IDLE_CONTROLS, rotateLeft: true }
+    : { ...THIRD_PERSON_IDLE_CONTROLS, rotateRight: true };
+};
 
 const distanceToSegment2D = (
   point: THREE.Vector2,
@@ -576,7 +623,15 @@ const CameraSetup = ({
   return null;
 };
 
-const Player = ({ isLocked }: { isLocked: boolean }) => {
+const Player = ({
+  isLocked,
+  mobileControls,
+  mobileLookDeltaRef,
+}: {
+  isLocked: boolean;
+  mobileControls: FirstPersonControlState;
+  mobileLookDeltaRef: React.MutableRefObject<{ deltaX: number; deltaY: number }>;
+}) => {
   const { camera } = useThree();
   const velocity = useRef(new THREE.Vector3());
   const direction = useRef(new THREE.Vector3());
@@ -625,7 +680,7 @@ const Player = ({ isLocked }: { isLocked: boolean }) => {
       // Standard Y: movementY > 0 means mouse down, we want to look DOWN (euler.x decreases)
       euler.current.x -= movementY * 0.002; 
 
-      euler.current.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, euler.current.x));
+      euler.current.x = Math.max(-FIRST_PERSON_VERTICAL_LIMIT, Math.min(FIRST_PERSON_VERTICAL_LIMIT, euler.current.x));
 
       camera.quaternion.setFromEuler(euler.current);
     };
@@ -640,16 +695,36 @@ const Player = ({ isLocked }: { isLocked: boolean }) => {
     };
   }, [isLocked, camera]);
 
+  useEffect(() => {
+    euler.current.setFromQuaternion(camera.quaternion);
+  }, [camera, isLocked]);
+
   useFrame((_state, delta) => {
     if (!isLocked) return;
+
+    const { deltaX, deltaY } = mobileLookDeltaRef.current;
+    if (deltaX !== 0 || deltaY !== 0) {
+      euler.current.setFromQuaternion(camera.quaternion);
+      euler.current.y -= deltaX * FIRST_PERSON_TOUCH_LOOK_SENSITIVITY;
+      euler.current.x -= deltaY * FIRST_PERSON_TOUCH_LOOK_SENSITIVITY;
+      euler.current.x = Math.max(-FIRST_PERSON_VERTICAL_LIMIT, Math.min(FIRST_PERSON_VERTICAL_LIMIT, euler.current.x));
+      camera.quaternion.setFromEuler(euler.current);
+      mobileLookDeltaRef.current.deltaX = 0;
+      mobileLookDeltaRef.current.deltaY = 0;
+    }
     
     // Reset velocity if no keys pressed
-    if (!moveForward.current && !moveBackward.current && !moveLeft.current && !moveRight.current) {
+    const forwardActive = moveForward.current || mobileControls.moveForward;
+    const backwardActive = moveBackward.current;
+    const leftActive = moveLeft.current || mobileControls.moveLeft;
+    const rightActive = moveRight.current || mobileControls.moveRight;
+
+    if (!forwardActive && !backwardActive && !leftActive && !rightActive) {
       velocity.current.set(0, 0, 0);
     } else {
       // W is forward, S is backward. In Three.js, -Z is forward.
-      direction.current.z = Number(moveBackward.current) - Number(moveForward.current);
-      direction.current.x = Number(moveRight.current) - Number(moveLeft.current);
+      direction.current.z = Number(backwardActive) - Number(forwardActive);
+      direction.current.x = Number(rightActive) - Number(leftActive);
       direction.current.normalize();
 
       const speed = 5;
@@ -721,11 +796,13 @@ const SceneReadyNotifier = ({ onReady }: { onReady?: () => void }) => {
 
 const ThirdPersonWalker = ({
   active,
+  mobileControls,
   wallSegments,
   doorPassages,
   bounds,
 }: {
   active: boolean;
+  mobileControls: ThirdPersonControlState;
   wallSegments: Array<{ start: THREE.Vector2; end: THREE.Vector2; radius: number }>;
   doorPassages: Array<{
     center: THREE.Vector2;
@@ -843,11 +920,15 @@ const ThirdPersonWalker = ({
       return;
     }
 
-    const rotationInput = Number(rotateLeft.current) - Number(rotateRight.current);
+    const rotationInput =
+      Number(rotateLeft.current || mobileControls.rotateLeft) -
+      Number(rotateRight.current || mobileControls.rotateRight);
     yaw.current += rotationInput * THIRD_PERSON_ROTATION_SPEED * delta;
     visualYaw.current = angleLerp(visualYaw.current, yaw.current, THIRD_PERSON_ROTATION_DAMPING, delta);
 
-    const moveInput = Number(moveForward.current) - Number(moveBackward.current);
+    const moveInput =
+      Number(moveForward.current || mobileControls.moveForward) -
+      Number(moveBackward.current || mobileControls.moveBackward);
     const targetSpeed = moveInput * THIRD_PERSON_MOVE_SPEED;
     const speedDamping =
       moveInput === 0 ? THIRD_PERSON_DECELERATION_DAMPING : THIRD_PERSON_ACCELERATION_DAMPING;
@@ -1045,8 +1126,14 @@ const ThirdPersonWalker = ({
 export const Scene3D: React.FC<Scene3DProps> = ({ data, mode, onReady }) => {
   const [isLocked, setIsLocked] = useState(false);
   const [isCanvasMounted, setIsCanvasMounted] = useState(false);
+  const [isTouchDevice, setIsTouchDevice] = useState(false);
+  const [firstPersonTouchControls, setFirstPersonTouchControls] = useState<FirstPersonControlState>(FIRST_PERSON_IDLE_CONTROLS);
+  const [thirdPersonTouchControls, setThirdPersonTouchControls] = useState<ThirdPersonControlState>(THIRD_PERSON_IDLE_CONTROLS);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasElementRef = useRef<HTMLCanvasElement | null>(null);
+  const firstPersonLookDeltaRef = useRef({ deltaX: 0, deltaY: 0 });
+  const firstPersonLookTouchRef = useRef<{ identifier: number; lastX: number; lastY: number } | null>(null);
+  const thirdPersonTouchRef = useRef<{ identifier: number; startX: number; startY: number } | null>(null);
   const floorNoiseMap = React.useMemo(() => createFloorNoiseTexture(), []);
 
   // Gradient background texture
@@ -1138,6 +1225,168 @@ export const Scene3D: React.FC<Scene3DProps> = ({ data, mode, onReady }) => {
   const requestLock = () => {
     canvasElementRef.current?.requestPointerLock();
   };
+
+  useEffect(() => {
+    const updateTouchCapability = () => {
+      setIsTouchDevice(window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0);
+    };
+
+    updateTouchCapability();
+    window.addEventListener('resize', updateTouchCapability);
+    return () => window.removeEventListener('resize', updateTouchCapability);
+  }, []);
+
+  useEffect(() => {
+    if (mode !== 'first-person') {
+      firstPersonLookTouchRef.current = null;
+      firstPersonLookDeltaRef.current.deltaX = 0;
+      firstPersonLookDeltaRef.current.deltaY = 0;
+      setFirstPersonTouchControls(FIRST_PERSON_IDLE_CONTROLS);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode === 'third-person') {
+      return;
+    }
+
+    thirdPersonTouchRef.current = null;
+    setThirdPersonTouchControls(THIRD_PERSON_IDLE_CONTROLS);
+  }, [mode]);
+
+  const stopThirdPersonTouchControls = React.useCallback(() => {
+    thirdPersonTouchRef.current = null;
+    setThirdPersonTouchControls(THIRD_PERSON_IDLE_CONTROLS);
+  }, []);
+
+  const setFirstPersonTouchControl = React.useCallback(
+    (control: keyof FirstPersonControlState, active: boolean) => {
+      setFirstPersonTouchControls((current) => {
+        if (current[control] === active) {
+          return current;
+        }
+
+        return { ...current, [control]: active };
+      });
+    },
+    [],
+  );
+
+  const stopFirstPersonLook = React.useCallback(() => {
+    firstPersonLookTouchRef.current = null;
+    firstPersonLookDeltaRef.current.deltaX = 0;
+    firstPersonLookDeltaRef.current.deltaY = 0;
+  }, []);
+
+  const handleFirstPersonLookStart = React.useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    if (!isTouchDevice || mode !== 'first-person' || firstPersonLookTouchRef.current) {
+      return;
+    }
+
+    const touch = event.changedTouches[0];
+    if (!touch) {
+      return;
+    }
+
+    firstPersonLookTouchRef.current = {
+      identifier: touch.identifier,
+      lastX: touch.clientX,
+      lastY: touch.clientY,
+    };
+    firstPersonLookDeltaRef.current.deltaX = 0;
+    firstPersonLookDeltaRef.current.deltaY = 0;
+    event.preventDefault();
+  }, [isTouchDevice, mode]);
+
+  const handleFirstPersonLookMove = React.useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    const activeTouch = firstPersonLookTouchRef.current;
+    if (!activeTouch || !isTouchDevice || mode !== 'first-person') {
+      return;
+    }
+
+    const touch = Array.from(event.changedTouches).find(({ identifier }) => identifier === activeTouch.identifier);
+    if (!touch) {
+      return;
+    }
+
+    firstPersonLookDeltaRef.current.deltaX += touch.clientX - activeTouch.lastX;
+    firstPersonLookDeltaRef.current.deltaY += touch.clientY - activeTouch.lastY;
+    activeTouch.lastX = touch.clientX;
+    activeTouch.lastY = touch.clientY;
+    event.preventDefault();
+  }, [isTouchDevice, mode]);
+
+  const handleFirstPersonLookEnd = React.useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    const activeTouch = firstPersonLookTouchRef.current;
+    if (!activeTouch) {
+      return;
+    }
+
+    const hasTrackedTouchEnded = Array.from(event.changedTouches).some(
+      ({ identifier }) => identifier === activeTouch.identifier,
+    );
+
+    if (hasTrackedTouchEnded) {
+      stopFirstPersonLook();
+      event.preventDefault();
+    }
+  }, [stopFirstPersonLook]);
+
+  const handleThirdPersonTouchStart = React.useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    if (!isTouchDevice || mode !== 'third-person' || thirdPersonTouchRef.current) {
+      return;
+    }
+
+    const touch = event.changedTouches[0];
+    if (!touch) {
+      return;
+    }
+
+    thirdPersonTouchRef.current = {
+      identifier: touch.identifier,
+      startX: touch.clientX,
+      startY: touch.clientY,
+    };
+    setThirdPersonTouchControls(THIRD_PERSON_IDLE_CONTROLS);
+    event.preventDefault();
+  }, [isTouchDevice, mode]);
+
+  const handleThirdPersonTouchMove = React.useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    const activeTouch = thirdPersonTouchRef.current;
+    if (!activeTouch || !isTouchDevice || mode !== 'third-person') {
+      return;
+    }
+
+    const touch = Array.from(event.changedTouches).find(({ identifier }) => identifier === activeTouch.identifier);
+    if (!touch) {
+      return;
+    }
+
+    setThirdPersonTouchControls(
+      resolveThirdPersonTouchControls(
+        touch.clientX - activeTouch.startX,
+        touch.clientY - activeTouch.startY,
+        THIRD_PERSON_TOUCH_DEAD_ZONE,
+      ),
+    );
+    event.preventDefault();
+  }, [isTouchDevice, mode]);
+
+  const handleThirdPersonTouchEnd = React.useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    const activeTouch = thirdPersonTouchRef.current;
+    if (!activeTouch) {
+      return;
+    }
+
+    const hasTrackedTouchEnded = Array.from(event.changedTouches).some(
+      ({ identifier }) => identifier === activeTouch.identifier,
+    );
+
+    if (hasTrackedTouchEnded) {
+      stopThirdPersonTouchControls();
+      event.preventDefault();
+    }
+  }, [stopThirdPersonTouchControls]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -1293,9 +1542,16 @@ export const Scene3D: React.FC<Scene3DProps> = ({ data, mode, onReady }) => {
             ))}
           </group>
 
-          {mode === 'first-person' && <Player isLocked={isLocked} />}
+          {mode === 'first-person' && (
+            <Player
+              isLocked={isTouchDevice || isLocked}
+              mobileControls={firstPersonTouchControls}
+              mobileLookDeltaRef={firstPersonLookDeltaRef}
+            />
+          )}
           <ThirdPersonWalker
             active={mode === 'third-person'}
+            mobileControls={thirdPersonTouchControls}
             wallSegments={centeredWallSegments}
             doorPassages={centeredDoorPassages}
             bounds={centeredBounds}
@@ -1303,7 +1559,29 @@ export const Scene3D: React.FC<Scene3DProps> = ({ data, mode, onReady }) => {
         </Canvas>
       )}
 
-      {mode === 'first-person' && !isLocked && (
+      {isTouchDevice && mode === 'first-person' && (
+        <div
+          className="absolute inset-0 z-10"
+          onTouchStart={handleFirstPersonLookStart}
+          onTouchMove={handleFirstPersonLookMove}
+          onTouchEnd={handleFirstPersonLookEnd}
+          onTouchCancel={stopFirstPersonLook}
+          style={{ touchAction: 'none' }}
+        />
+      )}
+
+      {isTouchDevice && mode === 'third-person' && (
+        <div
+          className="absolute inset-0 z-10"
+          onTouchStart={handleThirdPersonTouchStart}
+          onTouchMove={handleThirdPersonTouchMove}
+          onTouchEnd={handleThirdPersonTouchEnd}
+          onTouchCancel={stopThirdPersonTouchControls}
+          style={{ touchAction: 'none' }}
+        />
+      )}
+
+      {mode === 'first-person' && !isTouchDevice && !isLocked && (
         <div 
           onClick={requestLock}
           className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-10 cursor-pointer"
@@ -1318,15 +1596,65 @@ export const Scene3D: React.FC<Scene3DProps> = ({ data, mode, onReady }) => {
         </div>
       )}
 
-      {mode === 'first-person' && isLocked && (
+      {mode === 'first-person' && !isTouchDevice && isLocked && (
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-20">
           <div className="w-1 h-1 bg-white rounded-full opacity-50" />
         </div>
       )}
 
+      {isTouchDevice && mode === 'first-person' && (
+        <div className="absolute bottom-22 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-2xl border border-white/10 bg-black/18 px-3 py-2 backdrop-blur-md">
+          <button
+            type="button"
+            className="flex h-12 w-12 items-center justify-center rounded-xl border border-white/12 bg-white/12 text-white active:bg-white/22"
+            onTouchStart={(event) => {
+              setFirstPersonTouchControl('moveLeft', true);
+              event.preventDefault();
+            }}
+            onTouchEnd={(event) => {
+              setFirstPersonTouchControl('moveLeft', false);
+              event.preventDefault();
+            }}
+            onTouchCancel={() => setFirstPersonTouchControl('moveLeft', false)}
+          >
+            <ChevronLeft className="h-5 w-5" />
+          </button>
+          <button
+            type="button"
+            className="flex h-12 min-w-14 items-center justify-center rounded-xl border border-white/12 bg-white/14 px-3 text-white active:bg-white/24"
+            onTouchStart={(event) => {
+              setFirstPersonTouchControl('moveForward', true);
+              event.preventDefault();
+            }}
+            onTouchEnd={(event) => {
+              setFirstPersonTouchControl('moveForward', false);
+              event.preventDefault();
+            }}
+            onTouchCancel={() => setFirstPersonTouchControl('moveForward', false)}
+          >
+            <Triangle className="h-4 w-4 fill-current" />
+          </button>
+          <button
+            type="button"
+            className="flex h-12 w-12 items-center justify-center rounded-xl border border-white/12 bg-white/12 text-white active:bg-white/22"
+            onTouchStart={(event) => {
+              setFirstPersonTouchControl('moveRight', true);
+              event.preventDefault();
+            }}
+            onTouchEnd={(event) => {
+              setFirstPersonTouchControl('moveRight', false);
+              event.preventDefault();
+            }}
+            onTouchCancel={() => setFirstPersonTouchControl('moveRight', false)}
+          >
+            <ChevronRight className="h-5 w-5" />
+          </button>
+        </div>
+      )}
+
       {mode === 'first-person' && (
         <div className="absolute bottom-4 left-4 text-white/50 text-[10px] font-mono bg-black/20 p-2 rounded backdrop-blur-sm z-20">
-          WASD to move • CLICK to look • ESC to exit
+          {isTouchDevice ? 'Drag to look • Buttons to move' : 'WASD to move • CLICK to look • ESC to exit'}
         </div>
       )}
 

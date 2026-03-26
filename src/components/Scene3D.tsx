@@ -24,7 +24,8 @@ interface FirstPersonControlState {
   moveRight: boolean;
 }
 
-const WALL_HEIGHT = 3;
+const DEFAULT_WALL_HEIGHT = 2.7;
+const CAMERA_WALL_REFERENCE_HEIGHT = 3;
 const SCALE_FACTOR = 0.01; // 1 unit = 1 cm = 0.01m
 const SCENE_PALETTE = {
   wall: '#F2EEE7',
@@ -227,6 +228,8 @@ const createWallToneTexture = () => {
   return texture;
 };
 
+const WALL_TOP_FACE_COLOR = '#655E55';
+
 const createFloorNoiseTexture = () => {
   const canvas = document.createElement('canvas');
   canvas.width = 256;
@@ -396,16 +399,23 @@ const WallBlock = ({
   position,
   args,
   color = SCENE_PALETTE.wall,
+  topColor,
   map,
 }: {
   position: [number, number, number];
   args: [number, number, number];
   color?: string;
+  topColor: string;
   map?: THREE.Texture;
 }) => (
   <mesh position={position} castShadow receiveShadow>
     <boxGeometry args={args} />
-    <meshStandardMaterial color={color} map={map} roughness={0.95} metalness={0} />
+    <meshStandardMaterial attach="material-0" color={color} map={map} roughness={0.95} metalness={0} />
+    <meshStandardMaterial attach="material-1" color={color} map={map} roughness={0.95} metalness={0} />
+    <meshStandardMaterial attach="material-2" color={topColor} map={map} roughness={0.95} metalness={0} />
+    <meshStandardMaterial attach="material-3" color={color} map={map} roughness={0.95} metalness={0} />
+    <meshStandardMaterial attach="material-4" color={color} map={map} roughness={0.95} metalness={0} />
+    <meshStandardMaterial attach="material-5" color={color} map={map} roughness={0.95} metalness={0} />
   </mesh>
 );
 
@@ -429,6 +439,7 @@ const Wall = ({
   const wallLength = Math.sqrt(dx * dx + dz * dz);
   const angle = Math.atan2(dz, dx);
   const wallToneMap = React.useMemo(() => createWallToneTexture(), []);
+  const wallTopColor = WALL_TOP_FACE_COLOR;
   
   // Find openings that belong to this wall
   // We check if the opening position is close to the wall line segment
@@ -450,9 +461,10 @@ const Wall = ({
       segments.push(
         <WallBlock
           key={`seg-before-${i}`}
-          position={[segCenterX * wallLength, WALL_HEIGHT / 2, 0]}
-          args={[segLen, WALL_HEIGHT, wallThickness]}
+          position={[segCenterX * wallLength, DEFAULT_WALL_HEIGHT / 2, 0]}
+          args={[segLen, DEFAULT_WALL_HEIGHT, wallThickness]}
           color={wallColor}
+          topColor={wallTopColor}
           map={wallToneMap}
         />
       );
@@ -465,13 +477,14 @@ const Wall = ({
     if (op.type === 'door') {
       // Top part above door (usually 2.1m high door)
       const doorHeight = 2.1;
-      const topPartHeight = WALL_HEIGHT - doorHeight;
+      const topPartHeight = DEFAULT_WALL_HEIGHT - doorHeight;
       segments.push(
         <WallBlock
           key={`door-top-${i}`}
           position={[opCenterX * wallLength, doorHeight + topPartHeight / 2, 0]}
           args={[opLen, topPartHeight, wallThickness]}
           color={wallColor}
+          topColor={wallTopColor}
           map={wallToneMap}
         />
       );
@@ -489,12 +502,13 @@ const Wall = ({
             position={[opCenterX * wallLength, winBottom / 2, 0]}
             args={[opLen, winBottom, wallThickness]}
             color={wallColor}
+            topColor={wallTopColor}
             map={wallToneMap}
           />
         );
       }
 
-      const topPartHeight = WALL_HEIGHT - winTop;
+      const topPartHeight = DEFAULT_WALL_HEIGHT - winTop;
       if (topPartHeight > 0.01) {
         segments.push(
           <WallBlock
@@ -502,6 +516,7 @@ const Wall = ({
             position={[opCenterX * wallLength, winTop + topPartHeight / 2, 0]}
             args={[opLen, topPartHeight, wallThickness]}
             color={wallColor}
+            topColor={wallTopColor}
             map={wallToneMap}
           />
         );
@@ -541,9 +556,10 @@ const Wall = ({
     segments.push(
       <WallBlock
         key="seg-final"
-        position={[segCenterX * wallLength, WALL_HEIGHT / 2, 0]}
-        args={[segLen, WALL_HEIGHT, wallThickness]}
+        position={[segCenterX * wallLength, DEFAULT_WALL_HEIGHT / 2, 0]}
+        args={[segLen, DEFAULT_WALL_HEIGHT, wallThickness]}
         color={wallColor}
+        topColor={wallTopColor}
         map={wallToneMap}
       />
     );
@@ -559,10 +575,13 @@ const Wall = ({
 const Corner3D = ({ position, thickness }: { position: { x: number, y: number }, thickness: number }) => {
   const radius = (thickness / 2) * SCALE_FACTOR;
   const worldPosition = planPointToWorld(position);
+  const topColor = WALL_TOP_FACE_COLOR;
   return (
-    <mesh position={[worldPosition.x, WALL_HEIGHT / 2, worldPosition.z]} castShadow receiveShadow>
-      <cylinderGeometry args={[radius, radius, WALL_HEIGHT, 16]} />
-      <meshStandardMaterial color={SCENE_PALETTE.corner} roughness={0.98} metalness={0} />
+    <mesh position={[worldPosition.x, DEFAULT_WALL_HEIGHT / 2, worldPosition.z]} castShadow receiveShadow>
+      <cylinderGeometry args={[radius, radius, DEFAULT_WALL_HEIGHT, 16]} />
+      <meshStandardMaterial attach="material-0" color={SCENE_PALETTE.corner} roughness={0.98} metalness={0} />
+      <meshStandardMaterial attach="material-1" color={topColor} roughness={0.98} metalness={0} />
+      <meshStandardMaterial attach="material-2" color={SCENE_PALETTE.corner} roughness={0.98} metalness={0} />
     </mesh>
   );
 };
@@ -589,7 +608,7 @@ const CameraSetup = ({
       return;
     }
 
-    const focusPoint = new THREE.Vector3(0, WALL_HEIGHT * 0.4, 0);
+    const focusPoint = new THREE.Vector3(0, CAMERA_WALL_REFERENCE_HEIGHT * 0.4, 0);
     const orbitDistance = Math.max(sceneSpan * 1.15, 10);
 
     camera.up.set(0, 1, 0);
@@ -1461,7 +1480,7 @@ export const Scene3D: React.FC<Scene3DProps> = ({ data, mode, onReady }) => {
           {mode === 'orbit' && (
             <OrbitControls
               makeDefault
-              target={[0, WALL_HEIGHT * 0.4, 0]}
+              target={[0, CAMERA_WALL_REFERENCE_HEIGHT * 0.4, 0]}
               maxPolarAngle={Math.PI / 2 - 0.05}
             />
           )}

@@ -32,6 +32,8 @@ const MULTI_WALL_ROTATION_STEP_DEGREES = 15;
 const TOUCH_LONG_PRESS_MS = 280;
 const TOUCH_MOVE_CANCEL_PX = 10;
 const UI_OVERLAY_EVENT_BLOCK_MS = 450;
+const MOBILE_WALL_CROSSHAIR_OFFSET_X_PX = 28;
+const MOBILE_WALL_CROSSHAIR_OFFSET_Y_PX = -76;
 const ENDPOINT_VISUAL_RADIUS_PX = 4;
 const ENDPOINT_SELECTED_VISUAL_RADIUS_PX = 6;
 const MOBILE_DIRECTIONAL_SNAP_TOLERANCE_DEGREES = 2;
@@ -1420,6 +1422,7 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
   const [lockedWallDirection, setLockedWallDirection] = useState<LockedWallDirection | null>(null);
   const [isMobileWallLengthInputOpen, setIsMobileWallLengthInputOpen] = useState(false);
   const [mobileLockedPreviewLengthCm, setMobileLockedPreviewLengthCm] = useState<number | null>(null);
+  const [mobileTouchMarkerPoint, setMobileTouchMarkerPoint] = useState<Point | null>(null);
   const [continuationDirections, setContinuationDirections] = useState<LockedWallDirection[] | null>(null);
   const [activeDirectionalSnapLabel, setActiveDirectionalSnapLabel] = useState<string | null>(null);
   const [isRoomMeasureMode, setIsRoomMeasureMode] = useState(false);
@@ -1592,6 +1595,18 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     mediaQuery.addListener(updateViewportMode);
     return () => mediaQuery.removeListener(updateViewportMode);
   }, []);
+
+  useEffect(() => {
+    const shouldKeepMobileTouchMarker =
+      isMobileViewport && (
+        (activeTool === 'draw' && !isReferenceCalibration) ||
+        (isReferenceCalibration && referenceCalibrationSegment === null)
+      );
+
+    if (!shouldKeepMobileTouchMarker) {
+      setMobileTouchMarkerPoint(null);
+    }
+  }, [activeTool, currentStart, isMobileViewport, isReferenceCalibration, referenceCalibrationSegment]);
 
   useEffect(() => {
     currentThicknessRef.current = currentThickness;
@@ -2477,14 +2492,104 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     return Math.hypot(previewPoint.x - currentStart.x, previewPoint.y - currentStart.y);
   }, [currentStart, getCurrentWallPreviewPoint]);
 
-  const getReferenceCalibrationPreviewPoint = useCallback(() => {
-    if (!referenceCalibrationStart) return null;
+  const updateMobileWallDraftPreviewFromClient = useCallback((clientX: number, clientY: number) => {
+    const fingerPoint = getRelativePosFromClient(clientX, clientY);
+    setMobileTouchMarkerPoint(fingerPoint);
+
+    if (
+      !isMobileViewport ||
+      activeTool !== 'draw' ||
+      isReferenceCalibration ||
+      isWallLengthInputActive
+    ) {
+      return;
+    }
+
+    const crosshairRawPos = getRelativePosFromClient(
+      clientX + MOBILE_WALL_CROSSHAIR_OFFSET_X_PX,
+      clientY + MOBILE_WALL_CROSSHAIR_OFFSET_Y_PX,
+    );
+    const snapResult = getSnapResult(crosshairRawPos, false, {
+      anchor: currentStart,
+      allowAlignment: Boolean(currentStart),
+      continuationDirections,
+      enableDirectionalSnap: Boolean(currentStart),
+    });
+
+    setMousePos(snapResult.point);
+    setActiveSnapNode(snapResult.snappedNode);
+    setAlignmentGuides(currentStart ? snapResult.guides : []);
+    setActiveDirectionalSnapLabel(snapResult.directionalSnapLabel ?? null);
+  }, [
+    activeTool,
+    continuationDirections,
+    currentStart,
+    getRelativePosFromClient,
+    getSnapResult,
+    isMobileViewport,
+    isReferenceCalibration,
+    isWallLengthInputActive,
+  ]);
+
+  const updateMobileReferenceCalibrationPreviewFromClient = useCallback((clientX: number, clientY: number) => {
+    const fingerPoint = getRelativePosFromClient(clientX, clientY);
+    setMobileTouchMarkerPoint(fingerPoint);
+
+    if (!isMobileViewport || !isReferenceCalibration || referenceCalibrationSegment) {
+      return;
+    }
+
+    const crosshairRawPos = getRelativePosFromClient(
+      clientX + MOBILE_WALL_CROSSHAIR_OFFSET_X_PX,
+      clientY + MOBILE_WALL_CROSSHAIR_OFFSET_Y_PX,
+    );
+    const snapResult = getSnapResult(crosshairRawPos, false, {
+      anchor: referenceCalibrationStart,
+      allowAlignment: Boolean(referenceCalibrationStart),
+    });
+
+    setMousePos(snapResult.point);
+    setActiveSnapNode(snapResult.snappedNode);
+    setAlignmentGuides(snapResult.guides);
+    setActiveDirectionalSnapLabel(null);
+  }, [
+    getRelativePosFromClient,
+    getSnapResult,
+    isMobileViewport,
+    isReferenceCalibration,
+    referenceCalibrationSegment,
+    referenceCalibrationStart,
+  ]);
+
+  const getCurrentReferenceCalibrationCandidatePoint = useCallback(() => {
+    if (!isReferenceCalibration || referenceCalibrationSegment) {
+      return null;
+    }
+
+    if (isMobileViewport) {
+      return mobileTouchMarkerPoint ? mousePos : null;
+    }
+
     const snapResult = getSnapResult(rawMousePos, false, {
       anchor: referenceCalibrationStart,
-      allowAlignment: true,
+      allowAlignment: Boolean(referenceCalibrationStart),
     });
     return snapResult.point;
-  }, [getSnapResult, rawMousePos, referenceCalibrationStart]);
+  }, [
+    getSnapResult,
+    isMobileViewport,
+    isReferenceCalibration,
+    mobileTouchMarkerPoint,
+    mousePos,
+    rawMousePos,
+    referenceCalibrationSegment,
+    referenceCalibrationStart,
+  ]);
+
+  const getReferenceCalibrationPreviewPoint = useCallback(() => {
+    if (!referenceCalibrationStart) return null;
+    return getCurrentReferenceCalibrationCandidatePoint();
+  }, [getCurrentReferenceCalibrationCandidatePoint, referenceCalibrationStart]);
 
   const cancelScaleSegmentDraft = useCallback(() => {
     if (isReferenceCalibration && referenceCalibrationStart) {
@@ -2542,13 +2647,128 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     walls,
   ]);
 
-  const shouldShowMobileWallLengthPill = activeTool === 'draw' && currentStart !== null && !isReferenceCalibration;
+  const shouldShowMobileWallLengthPill = activeTool === 'draw' && !isReferenceCalibration && isMobileViewport;
+  const isMobileWallPrecisionAidVisible = shouldShowMobileWallLengthPill;
+  const isMobileReferenceCalibrationPrecisionVisible = isMobileViewport && isReferenceCalibration && !referenceCalibrationSegment;
   const mobileWallLengthDisplayValue = isMobileWallLengthInputOpen
     ? wallLengthInputValue
     : (() => {
         const previewLength = getPreviewWallLengthCm();
         return previewLength !== null ? formatMetersValue(previewLength) : '--';
       })();
+  const mobilePrecisionPreviewPoint = isMobileWallPrecisionAidVisible
+    ? (currentStart ? getCurrentWallPreviewPoint() : (mobileTouchMarkerPoint ? mousePos : null))
+    : null;
+  const mobileReferenceCalibrationCandidatePoint = isMobileReferenceCalibrationPrecisionVisible
+    ? getCurrentReferenceCalibrationCandidatePoint()
+    : null;
+  const canConfirmMobilePrecisionPoint = Boolean(
+    !isMobileWallLengthInputOpen &&
+    mobileTouchMarkerPoint &&
+    mobilePrecisionPreviewPoint &&
+    (
+      !currentStart ||
+      Math.hypot(
+        mobilePrecisionPreviewPoint.x - currentStart.x,
+        mobilePrecisionPreviewPoint.y - currentStart.y,
+      ) > ROOM_GRAPH_EPSILON
+    ),
+  );
+  const canConfirmMobileReferenceCalibrationPoint = Boolean(
+    mobileReferenceCalibrationCandidatePoint &&
+    (
+      !referenceCalibrationStart ||
+      Math.hypot(
+        mobileReferenceCalibrationCandidatePoint.x - referenceCalibrationStart.x,
+        mobileReferenceCalibrationCandidatePoint.y - referenceCalibrationStart.y,
+      ) > ROOM_GRAPH_EPSILON
+    ),
+  );
+  const mobilePrecisionCrosshairArm = 12 / zoom;
+  const mobilePrecisionCrosshairGap = 4 / zoom;
+  const mobilePrecisionFingerDotRadius = 8 / zoom;
+
+  const getMobileDraftCommitPoint = useCallback(() => {
+    if (!isMobileViewport || activeTool !== 'draw') {
+      return null;
+    }
+
+    const previewPoint = currentStart
+      ? getCurrentWallPreviewPoint()
+      : (mobileTouchMarkerPoint ? mousePos : null);
+    if (!previewPoint) {
+      return null;
+    }
+
+    if (
+      currentStart &&
+      Math.hypot(previewPoint.x - currentStart.x, previewPoint.y - currentStart.y) <= ROOM_GRAPH_EPSILON
+    ) {
+      return null;
+    }
+
+    return previewPoint;
+  }, [activeTool, currentStart, getCurrentWallPreviewPoint, isMobileViewport, mobileTouchMarkerPoint, mousePos]);
+
+  const confirmMobileReferenceCalibrationPoint = useCallback(() => {
+    const candidatePoint = getCurrentReferenceCalibrationCandidatePoint();
+    if (!candidatePoint) {
+      return;
+    }
+
+    if (!referenceCalibrationStart) {
+      setReferenceCalibrationStart(candidatePoint);
+      setMousePos(candidatePoint);
+      setAlignmentGuides([]);
+      setActiveSnapNode(null);
+      setSelectedWallIndex(null);
+      setSelectedOpeningIndex(null);
+      return;
+    }
+
+    if (Math.hypot(candidatePoint.x - referenceCalibrationStart.x, candidatePoint.y - referenceCalibrationStart.y) <= ROOM_GRAPH_EPSILON) {
+      return;
+    }
+
+    setReferenceCalibrationSegment({
+      start: referenceCalibrationStart,
+      end: candidatePoint,
+    });
+    setReferenceCalibrationStart(null);
+    setMousePos(candidatePoint);
+    setAlignmentGuides([]);
+    setActiveSnapNode(null);
+  }, [getCurrentReferenceCalibrationCandidatePoint, referenceCalibrationStart]);
+
+  const commitMobileWallCandidatePoint = useCallback(() => {
+    const commitPoint = getMobileDraftCommitPoint();
+    if (!commitPoint) {
+      return;
+    }
+
+    setMousePos(commitPoint);
+
+    if (currentStart) {
+      commitWallSegment(commitPoint);
+      return;
+    }
+
+    setCurrentStart(commitPoint);
+    setContinuationDirections(activeSnapNode?.kind === 'endpoint' ? getContinuationDirectionsForPoint(commitPoint) : null);
+    resetWallLengthInput();
+    setAlignmentGuides([]);
+    setActiveSnapNode(null);
+    setActiveDirectionalSnapLabel(null);
+    setSelectedWallIndex(null);
+    setSelectedOpeningIndex(null);
+  }, [
+    commitWallSegment,
+    currentStart,
+    activeSnapNode,
+    getContinuationDirectionsForPoint,
+    getMobileDraftCommitPoint,
+    resetWallLengthInput,
+  ]);
 
   const rotateSelectedWalls = useCallback((direction: 'ccw' | 'cw') => {
     if (!selectedWallsRotationPivot || selectedWallIndices.length < 2) {
@@ -3649,7 +3869,13 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
 
     const rawPos = getRelativePosFromClient(e.clientX, e.clientY);
     setRawMousePos(rawPos);
-    setMousePos(rawPos);
+    if (isMobileViewport && isReferenceCalibration) {
+      updateMobileReferenceCalibrationPreviewFromClient(e.clientX, e.clientY);
+    } else if (isMobileViewport && activeTool === 'draw') {
+      updateMobileWallDraftPreviewFromClient(e.clientX, e.clientY);
+    } else {
+      setMousePos(rawPos);
+    }
 
     if (isPrintModeActive && printFrame) {
       const isInsideFrame = isPointInsideRect(rawPos, {
@@ -3677,6 +3903,25 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
         setActiveSnapNode(null);
         return;
       }
+    }
+
+    if (isAdjustingBackground && hasBackground) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      touchPressRef.current = {
+        pointerId: e.pointerId,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startWorld: rawPos,
+        target: { type: 'empty' },
+        dragActivated: true,
+      };
+      setBackgroundDragOrigin({
+        pointer: rawPos,
+        transform: backgroundTransformRef.current,
+      });
+      setAlignmentGuides([]);
+      setActiveSnapNode(null);
+      return;
     }
 
     let target: TouchPressState['target'] = { type: 'empty' };
@@ -3823,6 +4068,18 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       }
 
       if (touchPressRef.current?.dragActivated) {
+        if (backgroundDragOrigin && hasBackground) {
+          setBackgroundTransform({
+            ...backgroundDragOrigin.transform,
+            x: backgroundDragOrigin.transform.x + (rawPos.x - backgroundDragOrigin.pointer.x),
+            y: backgroundDragOrigin.transform.y + (rawPos.y - backgroundDragOrigin.pointer.y),
+          });
+          setMousePos(rawPos);
+          setAlignmentGuides([]);
+          setActiveSnapNode(null);
+          return;
+        }
+
         if (draggingPrintFrame) {
           setPrintFrame((currentFrame) => {
             if (!currentFrame) {
@@ -3915,23 +4172,13 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
       return;
     }
 
-    if (activeTool === 'draw' && currentStart) {
-      if (isWallLengthInputActive) {
-        setAlignmentGuides([]);
-        setActiveSnapNode(null);
-        return;
-      }
+    if (isReferenceCalibration) {
+      updateMobileReferenceCalibrationPreviewFromClient(e.clientX, e.clientY);
+      return;
+    }
 
-      const snapResult = getSnapResult(rawPos, false, {
-        anchor: currentStart,
-        allowAlignment: true,
-        continuationDirections,
-        enableDirectionalSnap: true,
-      });
-      setMousePos(snapResult.point);
-      setActiveSnapNode(snapResult.snappedNode);
-      setAlignmentGuides(snapResult.guides);
-      setActiveDirectionalSnapLabel(snapResult.directionalSnapLabel ?? null);
+    if (activeTool === 'draw' && isMobileViewport) {
+      updateMobileWallDraftPreviewFromClient(e.clientX, e.clientY);
       return;
     }
 
@@ -3995,6 +4242,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     }
 
     if (isReferenceCalibration) {
+      if (isMobileViewport) {
+        return;
+      }
+
       if (referenceCalibrationSegment) {
         return;
       }
@@ -4050,19 +4301,18 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
         return;
       }
 
-      const snapResult = getSnapResult(rawPos, false, {
-        anchor: currentStart,
-        allowAlignment: true,
-        continuationDirections,
-        enableDirectionalSnap: true,
-      });
-      setActiveDirectionalSnapLabel(snapResult.directionalSnapLabel ?? null);
-      commitWallSegment(snapResult.point);
+      commitMobileWallCandidatePoint();
       return;
     }
 
     if (activeTool === 'draw') {
+      if (isMobileViewport) {
+        commitMobileWallCandidatePoint();
+        return;
+      }
+
       const snapResult = getSnapResult(rawPos, false, { allowAlignment: false });
+      setMousePos(snapResult.point);
       setCurrentStart(snapResult.point);
       setContinuationDirections(snapResult.snappedNode?.kind === 'endpoint' ? getContinuationDirectionsForPoint(snapResult.point) : null);
       resetWallLengthInput();
@@ -4148,6 +4398,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     resetTouchInteractionState();
     handleMouseUp();
   };
+
+  const confirmMobilePrecisionPoint = useCallback(() => {
+    commitMobileWallCandidatePoint();
+  }, [commitMobileWallCandidatePoint]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     if (shouldIgnoreSurfaceEvent(e)) {
@@ -4716,9 +4970,13 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
         return { primary: "Enter the reference length." };
       }
       if (referenceCalibrationStart) {
-        return { primary: "Tap the second reference point." };
+        return isMobileViewport
+          ? { primary: "Aim the second reference point.", secondary: "Press confirm to lock it." }
+          : { primary: "Tap the second reference point." };
       }
-      return { primary: "Tap the first reference point." };
+      return isMobileViewport
+        ? { primary: "Aim the first reference point.", secondary: "Press confirm to lock it." }
+        : { primary: "Tap the first reference point." };
     }
 
     if (isCalibrating) {
@@ -4764,7 +5022,10 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
     }
 
     if (shouldShowMobileWallLengthPill) {
-      return { primary: currentStart ? "Tap again to finish the wall." : "Tap to start drawing." };
+      return {
+        primary: currentStart ? "Tap to place the next point." : "Aim the first wall point.",
+        secondary: currentStart ? "Or line up the crosshair and press confirm." : "Tap the canvas or press confirm to lock it.",
+      };
     }
 
     const isDrawToolActive = activeTool === 'draw';
@@ -4904,6 +5165,28 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                     ? "Select one traced wall and enter its real internal span to manually recalibrate the project scale."
                     : "Enter the real internal span of the selected wall segment."}
               </p>
+
+              {isReferenceCalibration && isMobileViewport && !referenceCalibrationSegment && (
+                <div className="space-y-3 rounded-[24px] border border-[#141414]/10 bg-[#F1ECE3] p-4">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#6C5A46]">
+                      {referenceCalibrationStart ? 'Second reference point' : 'First reference point'}
+                    </p>
+                    <p className="mt-2 text-sm leading-6 text-[#141414]/72">
+                      Move your finger until the crosshair sits on the exact reference point, then confirm it.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={confirmMobileReferenceCalibrationPoint}
+                    disabled={!canConfirmMobileReferenceCalibrationPoint}
+                    className="flex min-h-12 w-full items-center justify-center gap-2 rounded-[22px] bg-[#141414] px-4 py-3 text-[10px] font-bold uppercase tracking-[0.16em] text-white disabled:opacity-35"
+                  >
+                    <Check className="h-4 w-4" />
+                    {referenceCalibrationStart ? 'Confirm second point' : 'Confirm first point'}
+                  </button>
+                </div>
+              )}
 
               {(isReferenceCalibration ? referenceCalibrationSegment !== null : calibrationWallIndex !== null) && (
                 <div className="space-y-4">
@@ -6172,22 +6455,46 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
           >
             <div className={`w-full max-w-[20rem] rounded-[24px] border border-[#141414]/10 shadow-xl backdrop-blur-md transition-all ${isMobileWallLengthInputOpen ? 'bg-white/96 p-3' : 'bg-white/92 p-2.5'}`}>
               {!isMobileWallLengthInputOpen ? (
-                <button
-                  type="button"
-                  onClick={beginMobileWallLengthInput}
-                  className="flex min-h-12 w-full items-center justify-between gap-3 rounded-[18px] bg-[#141414]/5 px-4 py-3 text-left text-[#141414]"
-                >
-                  <div>
-                    <span className="block text-[9px] font-bold uppercase tracking-[0.16em] text-[#141414]/38">Length (m)</span>
-                    <span className="mt-1 block text-base font-mono font-bold">{mobileWallLengthDisplayValue}</span>
-                  </div>
-                  <div className="text-right">
-                    {activeDirectionalSnapLabel && (
-                      <span className="block text-[9px] font-bold uppercase tracking-[0.14em] text-[#8C7355]">{activeDirectionalSnapLabel}</span>
-                    )}
-                    <span className="mt-1 block text-[10px] font-bold uppercase tracking-[0.16em] text-[#141414]/55">Tap to set</span>
-                  </div>
-                </button>
+                <div className="flex items-stretch gap-2">
+                  {currentStart ? (
+                    <button
+                      type="button"
+                      onClick={beginMobileWallLengthInput}
+                      className="flex min-h-12 flex-1 items-center justify-between gap-3 rounded-[18px] bg-[#141414]/5 px-4 py-3 text-left text-[#141414]"
+                    >
+                      <div>
+                        <span className="block text-[9px] font-bold uppercase tracking-[0.16em] text-[#141414]/38">Length (m)</span>
+                        <span className="mt-1 block text-base font-mono font-bold">{mobileWallLengthDisplayValue}</span>
+                      </div>
+                      <div className="text-right">
+                        {activeDirectionalSnapLabel && (
+                          <span className="block text-[9px] font-bold uppercase tracking-[0.14em] text-[#8C7355]">{activeDirectionalSnapLabel}</span>
+                        )}
+                        <span className="mt-1 block text-[10px] font-bold uppercase tracking-[0.16em] text-[#141414]/55">Tap to set</span>
+                      </div>
+                    </button>
+                  ) : (
+                    <div className="flex min-h-12 flex-1 items-center justify-between gap-3 rounded-[18px] bg-[#141414]/5 px-4 py-3 text-left text-[#141414]">
+                      <div>
+                        <span className="block text-[9px] font-bold uppercase tracking-[0.16em] text-[#141414]/38">Start point</span>
+                        <span className="mt-1 block text-sm font-bold text-[#141414]">Aim with the crosshair</span>
+                      </div>
+                      <div className="text-right">
+                        <span className="mt-1 block text-[10px] font-bold uppercase tracking-[0.16em] text-[#141414]/55">Tap or confirm</span>
+                      </div>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={confirmMobilePrecisionPoint}
+                    disabled={!canConfirmMobilePrecisionPoint}
+                    className="flex min-h-12 min-w-[4.5rem] flex-col items-center justify-center rounded-[18px] bg-[#141414] px-3 py-2 text-white disabled:opacity-35"
+                    aria-label="Confirm wall point at the crosshair"
+                  >
+                    <Check className="h-4 w-4" />
+                    <span className="mt-1 text-[9px] font-bold uppercase tracking-[0.16em]">Confirm</span>
+                  </button>
+                </div>
               ) : (
                 <form
                   className="space-y-3"
@@ -6390,6 +6697,124 @@ export const ManualTracer: React.FC<ManualTracerProps> = ({
                     className="opacity-90"
                     vectorEffect="non-scaling-stroke"
                   />
+                )}
+
+                {isMobileWallPrecisionAidVisible && mobileTouchMarkerPoint && (
+                  <circle
+                    cx={mobileTouchMarkerPoint.x}
+                    cy={mobileTouchMarkerPoint.y}
+                    r={mobilePrecisionFingerDotRadius}
+                    fill="#141414"
+                    fillOpacity={0.12}
+                    stroke="#141414"
+                    strokeOpacity={0.1}
+                    strokeWidth="1"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                )}
+
+                {isMobileWallPrecisionAidVisible && mobilePrecisionPreviewPoint && (
+                  <g pointerEvents="none">
+                    <line
+                      x1={mobilePrecisionPreviewPoint.x - mobilePrecisionCrosshairArm}
+                      y1={mobilePrecisionPreviewPoint.y}
+                      x2={mobilePrecisionPreviewPoint.x - mobilePrecisionCrosshairGap}
+                      y2={mobilePrecisionPreviewPoint.y}
+                      stroke="#8C7355"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    <line
+                      x1={mobilePrecisionPreviewPoint.x + mobilePrecisionCrosshairGap}
+                      y1={mobilePrecisionPreviewPoint.y}
+                      x2={mobilePrecisionPreviewPoint.x + mobilePrecisionCrosshairArm}
+                      y2={mobilePrecisionPreviewPoint.y}
+                      stroke="#8C7355"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    <line
+                      x1={mobilePrecisionPreviewPoint.x}
+                      y1={mobilePrecisionPreviewPoint.y - mobilePrecisionCrosshairArm}
+                      x2={mobilePrecisionPreviewPoint.x}
+                      y2={mobilePrecisionPreviewPoint.y - mobilePrecisionCrosshairGap}
+                      stroke="#8C7355"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    <line
+                      x1={mobilePrecisionPreviewPoint.x}
+                      y1={mobilePrecisionPreviewPoint.y + mobilePrecisionCrosshairGap}
+                      x2={mobilePrecisionPreviewPoint.x}
+                      y2={mobilePrecisionPreviewPoint.y + mobilePrecisionCrosshairArm}
+                      stroke="#8C7355"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  </g>
+                )}
+
+                {isMobileReferenceCalibrationPrecisionVisible && mobileTouchMarkerPoint && (
+                  <circle
+                    cx={mobileTouchMarkerPoint.x}
+                    cy={mobileTouchMarkerPoint.y}
+                    r={mobilePrecisionFingerDotRadius}
+                    fill="#141414"
+                    fillOpacity={0.12}
+                    stroke="#141414"
+                    strokeOpacity={0.1}
+                    strokeWidth="1"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                )}
+
+                {isMobileReferenceCalibrationPrecisionVisible && mobileReferenceCalibrationCandidatePoint && (
+                  <g pointerEvents="none">
+                    <line
+                      x1={mobileReferenceCalibrationCandidatePoint.x - mobilePrecisionCrosshairArm}
+                      y1={mobileReferenceCalibrationCandidatePoint.y}
+                      x2={mobileReferenceCalibrationCandidatePoint.x - mobilePrecisionCrosshairGap}
+                      y2={mobileReferenceCalibrationCandidatePoint.y}
+                      stroke="#8C7355"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    <line
+                      x1={mobileReferenceCalibrationCandidatePoint.x + mobilePrecisionCrosshairGap}
+                      y1={mobileReferenceCalibrationCandidatePoint.y}
+                      x2={mobileReferenceCalibrationCandidatePoint.x + mobilePrecisionCrosshairArm}
+                      y2={mobileReferenceCalibrationCandidatePoint.y}
+                      stroke="#8C7355"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    <line
+                      x1={mobileReferenceCalibrationCandidatePoint.x}
+                      y1={mobileReferenceCalibrationCandidatePoint.y - mobilePrecisionCrosshairArm}
+                      x2={mobileReferenceCalibrationCandidatePoint.x}
+                      y2={mobileReferenceCalibrationCandidatePoint.y - mobilePrecisionCrosshairGap}
+                      stroke="#8C7355"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    <line
+                      x1={mobileReferenceCalibrationCandidatePoint.x}
+                      y1={mobileReferenceCalibrationCandidatePoint.y + mobilePrecisionCrosshairGap}
+                      x2={mobileReferenceCalibrationCandidatePoint.x}
+                      y2={mobileReferenceCalibrationCandidatePoint.y + mobilePrecisionCrosshairArm}
+                      stroke="#8C7355"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  </g>
                 )}
 
                 {printFrame && (
